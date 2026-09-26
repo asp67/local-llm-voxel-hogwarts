@@ -1,0 +1,2836 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voxel Hogwarts — Floating Diorama (V2)</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: linear-gradient(180deg, #050817 0%, #0b1336 38%, #15215a 72%, #1c2a6a 100%);
+  }
+  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+  /* ---- loader ---- */
+  #loader {
+    position: fixed; inset: 0; z-index: 40; display: flex;
+    align-items: center; justify-content: center;
+    background: linear-gradient(180deg, #050817 0%, #0b1336 38%, #15215a 72%, #1c2a6a 100%);
+    transition: opacity .6s ease; font-family: "Segoe UI", system-ui, sans-serif;
+  }
+  #loader.done { opacity: 0; pointer-events: none; }
+  .lbox { width: 340px; text-align: center; color: #8fa6d8; }
+  .ltitle { font-size: 17px; letter-spacing: 3px; color: #cfd9f5; margin-bottom: 14px; text-shadow: 0 0 12px rgba(120,150,255,.35); }
+  .lbar { height: 6px; background: rgba(255,255,255,.10); border-radius: 3px; overflow: hidden; }
+  #lfill { height: 100%; width: 0%; background: linear-gradient(90deg, #ffa845, #ffcf78); transition: width .18s ease; }
+  #lstatus { margin-top: 10px; font-size: 12px; opacity: .75; min-height: 16px; }
+  /* ---- help HUD ---- */
+  #hud {
+    position: fixed; left: 14px; top: 14px; z-index: 10;
+    font-family: "Segoe UI", system-ui, sans-serif; font-size: 13px; line-height: 1.55;
+    color: #b9c6e6; background: rgba(10, 16, 38, 0.72);
+    border: 1px solid rgba(140, 160, 220, 0.22); border-radius: 10px;
+    padding: 10px 14px; max-width: 300px; user-select: none; backdrop-filter: blur(4px);
+  }
+  #hud h1 { font-size: 15px; margin: 0 0 6px; color: #e6ecff; letter-spacing: 0.6px; font-weight: 600; }
+  #hud b { color: #ffd9a0; font-weight: 600; }
+  #hud .dim { opacity: 0.6; font-size: 12px; }
+  #hud.collapsed .body { display: none; }
+  #stats {
+    position: fixed; left: 14px; bottom: 12px; z-index: 10;
+    font-family: "Consolas", "Courier New", monospace; font-size: 11px;
+    color: rgba(180, 197, 235, 0.55); user-select: none; white-space: pre;
+  }
+  #toggle {
+    position: fixed; right: 14px; top: 14px; z-index: 10; cursor: pointer;
+    font-family: "Segoe UI", sans-serif; font-size: 12px; color: #b9c6e6;
+    background: rgba(10, 16, 38, 0.72); border: 1px solid rgba(140, 160, 220, 0.22);
+    border-radius: 8px; padding: 6px 10px; user-select: none;
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="loader">
+  <div class="lbox">
+    <div class="ltitle">HOGWARTS &middot; VOXEL DIORAMA</div>
+    <div class="lbar"><div id="lfill"></div></div>
+    <div id="lstatus">waking the castle&hellip;</div>
+  </div>
+</div>
+<div id="hud">
+  <h1>&#9889; Voxel Hogwarts <span class="dim">v2</span></h1>
+  <div class="body">
+    <div><b>W A S D</b> — move &nbsp;·&nbsp; <b>R / F</b> — rise &amp; descend</div>
+    <div><b>Q / E</b> or <b>&larr; &rarr;</b> — rotate &nbsp;·&nbsp; <b>&uarr; &darr;</b> — tilt</div>
+    <div><b>Drag</b> — orbit &nbsp;·&nbsp; <b>Right-drag</b> — pan &nbsp;·&nbsp; <b>Wheel</b> — zoom</div>
+    <div><b>P</b> — isometric / perspective &nbsp;·&nbsp; <b>T</b> — auto-orbit</div>
+    <div><b>0</b> — reset view &nbsp;·&nbsp; <b>H</b> — hide this panel</div>
+    <div class="dim">Shift held = 3&times; speed · everything is procedural voxels</div>
+  </div>
+</div>
+<div id="stats"></div>
+<div id="toggle">hide UI</div>
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';/* ============================================================
+   01_core.js — grid, constants, palette, noise, RNG, primitives
+   All src/*.js files are concatenated into one <script type="module">,
+   so everything declared here is shared module scope.
+   ============================================================ */
+
+// ---------------- world constants ----------------
+const W = 288, H = 208, D = 288;          // voxel grid (x, y, z)
+const CX = 144, CZ = 144;                  // island centre
+const R = 132;                              // island top radius
+const LAKE_Y = 63;                          // top water voxel
+const BASE_Y = 65;                          // lowest grass tier
+const PLAT_Y = 100;                         // castle floor (plateau top voxel = 99)
+const GROUNDS_Y = BASE_Y + 18;              // 83 — NW walled grounds
+const S = 0.12;                             // plan px -> voxel scale
+const TAU = Math.PI * 2;
+
+const grid = new Uint8Array(W * H * D);     // material ids, 0 = air (~17 MB)
+const topY = new Int16Array(W * D).fill(-1); // terrain top per column
+
+const idx = (x, y, z) => x + W * (z + D * y);
+const inb = (x, y, z) => x >= 0 && x < W && y >= 0 && y < H && z >= 0 && z < D;
+const colIdx = (x, z) => x + W * z;
+
+// out of bounds reads as air; writes are clamped away
+function get(x, y, z) {
+  if (x < 0 || x >= W || y < 0 || y >= H || z < 0 || z >= D) return 0;
+  return grid[x + W * (z + D * y)];
+}
+function set(x, y, z, m) {
+  if (x < 0 || x >= W || y < 0 || y >= H || z < 0 || z >= D) return;
+  grid[x + W * (z + D * y)] = m;
+}
+const solid = (x, y, z) => get(x, y, z) !== 0;
+
+function surf(x, z) {                       // final terrain surface of a column
+  if (x < 0 || x >= W || z < 0 || z >= D) return 0;
+  return topY[x + W * z];
+}
+function refreshTop(x, z) {                // recompute topY after carving
+  if (x < 0 || x >= W || z < 0 || z >= D) return;
+  const c = x + W * z;
+  let y = topY[c];
+  if (y < 0) return;
+  while (y + 1 < H && solid(x, y + 1, z)) y++;     // grow up first (buildings)
+  while (y >= 0 && !solid(x, y, z)) y--;           // then down (carving)
+  topY[c] = y;
+}
+
+// ---------------- plan-pixel mapping ----------------
+// the 2000 px reference plan: east = +x, south = +z
+const PX = px => Math.round(CX + (px - 1100) * S);
+const PZ = py => Math.round(CZ + (py - 1080) * S);
+const PXinv = x => (x - CX) / S + 1100;
+const PZinv = z => (z - CZ) / S + 1080;
+
+// ---------------- palette ----------------
+const MATS = [null];                       // id 0 = air
+const PAL = {};
+const M_R = new Float32Array(256), M_G = new Float32Array(256), M_B = new Float32Array(256);
+const M_VARY = new Float32Array(256), M_KIND = new Uint8Array(256), M_OPAQUE = new Uint8Array(256);
+
+function mat(name, hex, kind, vary) {
+  const c = new THREE.Color(hex);          // sRGB hex -> linear working space
+  const id = MATS.length;
+  MATS.push({ id, name, hex, kind, vary, color: c });
+  PAL[name] = id;
+  M_R[id] = c.r; M_G[id] = c.g; M_B[id] = c.b;
+  M_VARY[id] = vary;
+  M_KIND[id] = kind;
+  M_OPAQUE[id] = (kind === 1 || kind === 2) ? 1 : 0;
+  return id;
+}
+// kind: 1 solid (Lambert) · 2 emissive (unlit + bloom) · 3 water · 4 glass
+// vary: ± brightness jitter per voxel ("grain")
+mat('STONE',  0x857563, 1, 0.050);   // castle walls
+mat('STONE2', 0x665a4d, 1, 0.050);   // plinths, string courses, foundations
+mat('STONE3', 0xa1917b, 1, 0.050);   // trim, crenels, quoins, sills, paving
+mat('ROOF',   0x33457e, 1, 0.050);   // slate roof
+mat('ROOF2',  0x243260, 1, 0.050);   // ridge & eaves
+mat('COPPER', 0x4f9483, 1, 0.050);   // spire tips
+mat('WIN',    0xffa845, 2, 0.020);   // lit windows
+mat('WIN2',   0xffcf78, 2, 0.020);   // Great Hall windows
+mat('WINDK',  0x1a2034, 1, 0.040);   // dark window
+mat('GRASS',  0x3b5a2d, 1, 0.090);
+mat('GRASS2', 0x2f4b27, 1, 0.090);
+mat('MOSS',   0x46552f, 1, 0.090);
+mat('DIRT',   0x5a4532, 1, 0.080);
+mat('ROCK',   0x5d5852, 1, 0.100);   // cliffs (strata)
+mat('ROCK2',  0x4a4540, 1, 0.100);
+mat('ROCK3',  0x6e675e, 1, 0.100);
+mat('UNDER',  0x3a332e, 1, 0.100);   // island underside
+mat('WATER',  0x1c3f78, 3, 0.040);
+mat('FOAM',   0x9fc3e8, 3, 0.040);
+mat('GLASS',  0x86c7b4, 4, 0.030);
+mat('WOOD',   0x5a3b22, 1, 0.070);
+mat('WOOD2',  0x7b5534, 1, 0.070);
+mat('TRUNK',  0x3a2a1b, 1, 0.080);
+mat('LEAF',   0x1f3b26, 1, 0.100);
+mat('LEAF2',  0x2b4b2b, 1, 0.100);
+mat('LEAF3',  0x162c1e, 1, 0.100);
+mat('LANT',   0xffcf6b, 2, 0.020);   // lanterns
+mat('CANDLE', 0xfff1c4, 2, 0.020);   // boat candles
+mat('PATH',   0x7a7062, 1, 0.070);
+mat('GRAVEL', 0x6b6357, 1, 0.080);
+mat('SAND',   0x8a7b5f, 1, 0.080);
+mat('GOLD',   0xd4a93a, 1, 0.050);   // hoops, finials
+mat('RED',    0x8e1f1f, 1, 0.060);
+mat('GREENH', 0x1f6b3a, 1, 0.060);
+mat('BLUEH',  0x23408e, 1, 0.060);
+mat('YELL',   0xc9a227, 1, 0.060);
+mat('PUMPK',  0xd9731c, 1, 0.060);
+mat('PALEST', 0x9b978f, 1, 0.060);   // stone circle, Hagrid's hut
+mat('CLOCK',  0xe8dcb0, 2, 0.020);   // clock faces
+mat('TRAINR', 0x9b1b1b, 1, 0.060);
+mat('BLACK',  0x1b1b20, 1, 0.050);
+mat('IRON',   0x2b2b31, 1, 0.060);
+mat('CARB',   0x6d9cc2, 1, 0.060);   // Ford Anglia
+mat('PLANT',  0x3f7a3a, 1, 0.090);
+mat('SQUID',  0x3d2c44, 1, 0.070);
+mat('CRYST',  0x6fb6ff, 2, 0.030);   // glowing crystals under the island
+
+const LIGHTS = [];                        // warm point lights collected while building
+
+// ---------------- randomness ----------------
+function hash(x, y, z) {
+  let h = Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(z | 0, 1442695041);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  h ^= h >>> 16;
+  return (h >>> 0) * 2.3283064365386963e-10;
+}
+
+function vnoise(x, z) {                    // smooth 2D value noise
+  const xi = Math.floor(x), zi = Math.floor(z);
+  const xf = x - xi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf), v = zf * zf * (3 - 2 * zf);
+  const a = hash(xi, 57, zi), b = hash(xi + 1, 57, zi);
+  const c = hash(xi, 57, zi + 1), d = hash(xi + 1, 57, zi + 1);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+
+function fbm(x, z, oct = 4) {              // fractal sum
+  let amp = 0.5, sum = 0, norm = 0;
+  for (let i = 0; i < oct; i++) {
+    sum += amp * vnoise(x, z); norm += amp;
+    x = x * 2.03 + 17.3; z = z * 2.03 + 9.1;
+    amp *= 0.5;
+  }
+  return sum / norm;
+}
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const RNG = mulberry32(19910731);          // deterministic placement stream
+const rnd = () => RNG();
+const rr = (a, b) => a + RNG() * (b - a);  // random float in [a,b)
+const ri = (a, b) => a + Math.floor(RNG() * (b - a + 1)); // random int in [a,b]
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+
+// ---------------- primitive shapes ----------------
+// inclusive axis-aligned box
+function box(x0, y0, z0, x1, y1, z1, m) {
+  if (x0 > x1) { const t = x0; x0 = x1; x1 = t; }
+  if (y0 > y1) { const t = y0; y0 = y1; y1 = t; }
+  if (z0 > z1) { const t = z0; z0 = z1; z1 = t; }
+  const xa = Math.max(0, x0), xb = Math.min(W - 1, x1);
+  const ya = Math.max(0, y0), yb = Math.min(H - 1, y1);
+  const za = Math.max(0, z0), zb = Math.min(D - 1, z1);
+  for (let y = ya; y <= yb; y++)
+    for (let z = za; z <= zb; z++) {
+      const row = xa + W * (z + D * y);
+      for (let x = xa; x <= xb; x++) grid[row + x - xa] = m;
+    }
+}
+
+// box that only writes into empty cells
+function boxAir(x0, y0, z0, x1, y1, z1, m) {
+  if (x0 > x1) { const t = x0; x0 = x1; x1 = t; }
+  if (y0 > y1) { const t = y0; y0 = y1; y1 = t; }
+  if (z0 > z1) { const t = z0; z0 = z1; z1 = t; }
+  for (let y = Math.max(0, y0); y <= Math.min(H - 1, y1); y++)
+    for (let z = Math.max(0, z0); z <= Math.min(D - 1, z1); z++)
+      for (let x = Math.max(0, x0); x <= Math.min(W - 1, x1); x++)
+        if (grid[idx(x, y, z)] === 0) set(x, y, z, m);
+}
+
+// horizontal disc at height y
+function disk(cx, cz, r, y, m) {
+  const r2 = r * r;
+  for (let z = Math.floor(cz - r); z <= cz + r; z++)
+    for (let x = Math.floor(cx - r); x <= cx + r; x++) {
+      const dx = x - cx, dz = z - cz;
+      if (dx * dx + dz * dz <= r2) set(x, y, z, m);
+    }
+}
+
+// filled vertical cylinder
+function cyl(cx, cz, r, y0, y1, m) {
+  const r2 = r * r;
+  for (let y = Math.min(y0, y1); y <= Math.max(y0, y1); y++)
+    for (let z = Math.floor(cz - r); z <= cz + r; z++)
+      for (let x = Math.floor(cx - r); x <= cx + r; x++) {
+        const dx = x - cx, dz = z - cz;
+        if (dx * dx + dz * dz <= r2) set(x, y, z, m);
+      }
+}
+
+// hollow ring (towers, walls)
+function ring(cx, cz, r, y0, y1, m, th = 0) {
+  const ro = r + th, ri2 = (r - 0.5) * (r - 0.5), ro2 = ro * ro;
+  for (let y = y0; y <= y1; y++)
+    for (let z = Math.floor(cz - ro); z <= cz + ro; z++)
+      for (let x = Math.floor(cx - ro); x <= cx + ro; x++) {
+        const d = (x - cx) * (x - cx) + (z - cz) * (z - cz);
+        if (d <= ro2 && d >= ri2) set(x, y, z, m);
+      }
+}
+
+// drop masonry straight down from yFrom until hitting solid ground (max len)
+function dropFill(x, z, yFrom, m, maxLen = 70) {
+  for (let y = yFrom, n = 0; y >= 0 && n <= maxLen; y--, n++) {
+    if (solid(x, y, z)) return;
+    set(x, y, z, m);
+  }
+}
+
+// ---------------- rotated / oriented helpers ----------------
+// local -> world: u along the length, v across
+function toWorld(cx, cz, ang, u, v) {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  return [Math.round(cx + u * c + v * s), Math.round(cz - u * s + v * c)];
+}
+function toLocal(cx, cz, ang, x, z) {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  const dx = x - cx, dz = z - cz;
+  return [dx * c - dz * s, dx * s + dz * c];
+}
+// iterate every world column of a rotated rectangle; fn(u, v, x, z)
+// with integer u (along length) and v (across) by nearest-neighbour rounding,
+// so rotated buildings stay crisp voxel art.
+function oriented2D(cx, cz, ang, hl, hw, fn) {
+  const c = Math.abs(Math.cos(ang)), s = Math.abs(Math.sin(ang));
+  const ex = Math.ceil(hl * c + hw * s), ez = Math.ceil(hl * s + hw * c);
+  for (let z = Math.floor(cz - ez); z <= cz + ez; z++)
+    for (let x = Math.floor(cx - ex); x <= cx + ex; x++) {
+      const l = toLocal(cx, cz, ang, x, z);
+      const u = Math.round(l[0]), v = Math.round(l[1]);
+      if (Math.abs(u) <= hl && Math.abs(v) <= hw) fn(u, v, x, z);
+    }
+}
+// solid rotated box between two heights
+function oriented(cx, cz, ang, hl, hw, y0, y1, m) {
+  oriented2D(cx, cz, ang, hl, hw, (u, v, x, z) => {
+    for (let y = y0; y <= y1; y++) set(x, y, z, m);
+  });
+}
+
+// ---------------- line walking ----------------
+// DDA over a segment: fn(x, z, t) with t in 0..1 (no gaps)
+function line2(x0, z0, x1, z1, fn) {
+  const steps = Math.max(Math.abs(x1 - x0), Math.abs(z1 - z0), 1);
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    fn(Math.round(lerp(x0, x1, t)), Math.round(lerp(z0, z1, t)), t);
+  }
+}
+// 3D variant: fn(x, y, z, t)
+function line3(x0, y0, z0, x1, y1, z1, fn) {
+  const steps = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), Math.abs(z1 - z0), 1);
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    fn(Math.round(lerp(x0, x1, t)), Math.round(lerp(y0, y1, t)),
+       Math.round(lerp(z0, z1, t)), t);
+  }
+}/* ============================================================
+   02_terrain.js — floating island: height field, lake, cliffs,
+   underside, waterfall  (PROJECT.md §6)
+   ============================================================ */
+
+const DEG = Math.PI / 180;
+// where the lake spills off the island edge
+const FALL = [Math.round(CX + 0.2 * R), Math.round(CZ + 0.98 * R)]; // (170, 273)
+
+// ---- plan-pixel shape tests (plan is 2000 px, north up) ----
+function inRect(px, py, x0, y0, x1, y1) {
+  return px >= x0 && px <= x1 && py >= y0 && py <= y1;
+}
+function inCirc(px, py, cx, cy, r) {
+  const dx = px - cx, dy = py - cy;
+  return dx * dx + dy * dy <= r * r;
+}
+function inORect(px, py, cx, cy, angDeg, hl, hw) {
+  const a = angDeg * DEG, c = Math.cos(a), s = Math.sin(a);
+  const dx = px - cx, dy = py - cy;
+  const u = dx * c - dy * s, v = dx * s + dy * c;
+  return Math.abs(u) <= hl && Math.abs(v) <= hw;
+}
+function inPoly(px, py, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i][0], yi = pts[i][1], xj = pts[j][0], yj = pts[j][1];
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+// union of every castle footprint — the gaps between masks become ravines
+function castleMask(px, py) {
+  return inRect(px, py, 1110, 430, 1590, 1035) ||      // greenhouse compound
+         inRect(px, py, 945, 585, 1285, 925) ||         // north quadrangle
+         inRect(px, py, 1265, 570, 1435, 1150) ||       // spine & nave
+         inRect(px, py, 1185, 1025, 1515, 1185) ||      // south block
+         inRect(px, py, 875, 900, 1095, 1100) ||        // apse
+         inRect(px, py, 1090, 900, 1225, 1030) ||       // fountain plaza
+         inORect(px, py, 835, 640, -22, 150, 95) ||     // NW angled wing
+         inORect(px, py, 890, 700, 19, 125, 55) ||      // NW arm
+         inRect(px, py, 1025, 365, 1185, 600) ||        // north connector
+         inRect(px, py, 755, 1160, 1135, 1515) ||       // courtyard block
+         inCirc(px, py, 1100, 1490, 115) ||             // astronomy circle
+         inORect(px, py, 1125, 1655, -34.9, 240, 95) || // Great Hall
+         inRect(px, py, 405, 1240, 715, 1435) ||        // clock courtyard
+         inCirc(px, py, 1330, 1600, 45);                // stair head circle
+}
+
+const GROUNDS_POLY = [
+  [1110, 360], [1000, 175], [890, 125], [660, 135], [520, 330],
+  [470, 420], [560, 520], [720, 520], [950, 560], [1070, 560]
+];
+
+// two-pass chamfer distance transform (1, √2) over a 288×288 mask
+function chamfer(mask) {
+  const dist = new Float32Array(W * D);
+  const INF = 1e9, D1 = 1, D2 = Math.SQRT2;
+  for (let i = 0; i < W * D; i++) dist[i] = mask[i] ? 0 : INF;
+  for (let z = 0; z < D; z++)
+    for (let x = 0; x < W; x++) {
+      const i = x + W * z;
+      if (dist[i] === 0) continue;
+      let d = dist[i];
+      if (x > 0) d = Math.min(d, dist[i - 1] + D1);
+      if (z > 0) d = Math.min(d, dist[i - W] + D1);
+      if (x > 0 && z > 0) d = Math.min(d, dist[i - W - 1] + D2);
+      if (x < W - 1 && z > 0) d = Math.min(d, dist[i - W + 1] + D2);
+      dist[i] = d;
+    }
+  for (let z = D - 1; z >= 0; z--)
+    for (let x = W - 1; x >= 0; x--) {
+      const i = x + W * z;
+      if (dist[i] === 0) continue;
+      let d = dist[i];
+      if (x < W - 1) d = Math.min(d, dist[i + 1] + D1);
+      if (z < D - 1) d = Math.min(d, dist[i + W] + D1);
+      if (x < W - 1 && z < D - 1) d = Math.min(d, dist[i + W + 1] + D2);
+      if (x > 0 && z < D - 1) d = Math.min(d, dist[i + W - 1] + D2);
+      dist[i] = d;
+    }
+  return dist;
+}
+
+function buildTerrain() {
+  const hgtA = new Int16Array(W * D);   // final column top
+  const kindA = new Uint8Array(W * D);  // 0 dry · 1 lake · 2 beach · 3 stone rim
+  const ybA = new Int16Array(W * D);    // underside bottom
+  const edgeA = new Float32Array(W * D);// jittered island radius per column
+
+  // ---- region distance fields ----
+  const fields = [];
+  const makeField = (fn, h, slope) => {
+    const mask = new Uint8Array(W * D);
+    for (let z = 0; z < D; z++)
+      for (let x = 0; x < W; x++)
+        mask[x + W * z] = fn(x, z) ? 1 : 0;
+    fields.push({ dist: chamfer(mask), h, slope });
+  };
+  makeField((x, z) => castleMask(PXinv(x), PZinv(z)), PLAT_Y - 1, 2.6);
+  makeField((x, z) => inPoly(PXinv(x), PZinv(z), GROUNDS_POLY), GROUNDS_Y, 1.6);
+  makeField((x, z) => (x - 50) * (x - 50) + (z - 190) * (z - 190) <= 8.4 * 8.4, BASE_Y + 3, 1.6);
+  makeField((x, z) => (x - 30) * (x - 30) + (z - 160) * (z - 160) <= 100, BASE_Y + 4, 1.6);
+  makeField((x, z) => inRect(PXinv(x), PZinv(z), 1740, 1600, 1880, 1790), LAKE_Y + 2, 2.6);
+
+  // ---- pass A: column tops (edge · regions · lake · base) ----
+  for (let z = 0; z < D; z++)
+    for (let x = 0; x < W; x++) {
+      const i = x + W * z;
+      const dx = x - CX, dz = z - CZ;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      const a = Math.atan2(dz, dx);
+      // island edge: radius jittered ±2.5 by angular noise
+      const edge = R + (vnoise(Math.cos(a) * 6 + 10, Math.sin(a) * 6 + 10) - 0.5) * 5;
+      edgeA[i] = edge;
+      if (dist > edge) continue;                    // open air beyond the island
+
+      const nDrop = fbm(x * 0.05, z * 0.05);
+      // grounds landmarks keep a clearing: suppress only the castle's terraced
+      // skirt (d > 0) around them — plateau masks themselves are never touched
+      const dHut = (x - 50) * (x - 50) + (z - 190) * (z - 190);
+      const dCir = (x - 30) * (x - 30) + (z - 160) * (z - 160);
+      const dWil = (x - 72) * (x - 72) + (z - 150) * (z - 150);
+      const clearing = dHut < 900 || dCir < 900 || dWil < 900;
+      let rmax = -1e9, rIn = -1e9;
+      for (let f = 0; f < fields.length; f++) {
+        const F = fields[f], d = F.dist[i];
+        if (d >= 1e8) continue;
+        if (clearing && d > 0 && f !== 2 && f !== 3) continue;
+        let hc;
+        if (d <= 0) { hc = F.h; if (hc > rIn) rIn = hc; }          // inside a plateau mask
+        else {
+          let drop = d * F.slope * (0.65 + 0.8 * nDrop);
+          drop = Math.floor(drop / 3) * 3 + (hash(x, 13, z) < 0.4 ? 1 : 0); // 3-voxel terraces + ledges
+          hc = F.h - drop;
+        }
+        if (hc > rmax) rmax = hc;
+      }
+
+      // base ground, lake bed and beach band
+      const lakeT = (z - CZ) + 0.25 * (x - CX) - 36 + (fbm(x * 0.02, z * 0.02) - 0.5) * 40;
+      let g, k = 0;
+      if (lakeT > 0) { g = LAKE_Y - 2 - Math.floor(hash(x, 3, z) * 8); k = 1; }      // LAKE_Y-2 … -9
+      else if (lakeT > -5) { g = LAKE_Y + 1; k = 2; }                               // beach band
+      else g = BASE_Y + Math.floor(fbm(x * 0.03, z * 0.03) * 10 - 4);
+
+      // the lake/beach override regional slopes, but never the plateau masks themselves
+      hgtA[i] = Math.max(g, k === 0 ? rmax : rIn);
+      kindA[i] = k;
+    }
+
+  // ---- pass B: stone lip along the lake rim (gap at the waterfall) ----
+  // detect against a snapshot first — mutating kindA mid-scan would cascade
+  const rimA = new Uint8Array(W * D);
+  for (let z = 1; z < D - 1; z++)
+    for (let x = 1; x < W - 1; x++) {
+      const i = x + W * z;
+      if (kindA[i] !== 1) continue;
+      if (hgtA[i] >= LAKE_Y + 2) continue;                     // plateau masks stay dry
+      const rim = kindA[i - 1] !== 1 || kindA[i + 1] !== 1 ||
+                  kindA[i - W] !== 1 || kindA[i + W] !== 1;
+      if (!rim) continue;
+      const fdx = x - FALL[0], fdz = z - FALL[1];
+      if (fdx * fdx + fdz * fdz <= 3.5 * 3.5) continue;  // 3.5-voxel gap
+      rimA[i] = 1;
+    }
+  for (let i = 0; i < W * D; i++)
+    if (rimA[i]) {
+      kindA[i] = 3;
+      if (hgtA[i] < LAKE_Y + 2) hgtA[i] = LAKE_Y + 2;
+    }
+
+  // ---- pass C: underside bottom (stepped "wedding cake") ----
+  for (let z = 0; z < D; z++)
+    for (let x = 0; x < W; x++) {
+      const i = x + W * z;
+      if (hgtA[i] === 0 && edgeA[i] === 0) continue;
+      const dx = x - CX, dz = z - CZ;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist > edgeA[i]) continue;
+      const t = dist / R;
+      const depth = 8 + 46 * (1 - Math.pow(t, 1.5)) + fbm(x * 0.04, z * 0.04) * 12;
+      let yb = Math.floor((LAKE_Y - 6 - depth) / 6) * 6;   // 6-voxel tiers
+      ybA[i] = yb < 0 ? 0 : yb;
+    }
+
+  // ---- pass D: fill columns with materials ----
+  for (let z = 0; z < D; z++)
+    for (let x = 0; x < W; x++) {
+      const i = x + W * z;
+      const hgt = hgtA[i], yb = ybA[i];
+      if (hgt <= 0) continue;                       // outside the island — stays air
+      const dx = x - CX, dz = z - CZ;
+      if (Math.sqrt(dx * dx + dz * dz) > edgeA[i]) continue;
+      const k = kindA[i];
+
+      // neighbour drop → cliff top vs flat top
+      let steep = false;
+      const n4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      for (let n = 0; n < 4; n++) {
+        const nx = x + n4[n][0], nz = z + n4[n][1];
+        if (nx < 0 || nx >= W || nz < 0 || nz >= D) continue;
+        const ni = nx + W * nz;
+        if (edgeA[ni] === 0 && hgtA[ni] === 0) continue;   // outside island — not a drop
+        if (hgt - hgtA[ni] > 2) { steep = true; break; }
+      }
+
+      let topM;
+      if (k === 3) topM = PAL.ROCK3;                                   // stone lip
+      else if (k === 1 && hgt < LAKE_Y)
+        topM = hash(x, 7, z) < 0.5 ? PAL.DIRT : PAL.ROCK2;             // lake bed
+      else if (k === 2 && hgt <= LAKE_Y + 1) topM = PAL.SAND;          // shore
+      else if (steep) topM = hash(x, 9, z) < 0.62 ? PAL.ROCK : PAL.MOSS;
+      else {
+        const r = hash(x, 5, z);
+        topM = r < 0.66 ? PAL.GRASS : r < 0.9 ? PAL.GRASS2 : PAL.MOSS;
+      }
+      set(x, hgt, z, topM);
+
+      // 1–2 dirt under grass
+      let nd = 0;
+      if (topM === PAL.GRASS || topM === PAL.GRASS2 || topM === PAL.MOSS) {
+        nd = 1 + (hash(x, 17, z) < 0.5 ? 1 : 0);
+        for (let n = 1; n <= nd && hgt - n > yb; n++) set(x, hgt - n, z, PAL.DIRT);
+      }
+
+      // rock strata body down to the underside
+      const warp = Math.floor(fbm(x * 0.08, z * 0.08) * 8);
+      for (let y = hgt - 1 - nd; y >= yb; y--) {
+        let m;
+        if (y < LAKE_Y - 8) {
+          const b = (y + warp) % 6;                                    // underside strata
+          m = b < 3 ? PAL.UNDER : PAL.ROCK2;
+        } else {
+          const b = (y + warp) % 9;                                    // cliff strata
+          m = b < 3 ? PAL.ROCK2 : b < 6 ? PAL.ROCK : PAL.ROCK3;
+        }
+        set(x, y, z, m);
+      }
+
+      // lake water up to LAKE_Y
+      if (k === 1 && hgt < LAKE_Y)
+        for (let y = hgt + 1; y <= LAKE_Y; y++) set(x, y, z, PAL.WATER);
+
+      topY[i] = hgt;
+    }
+
+  // ---- stalactites + crystal tips under the island ----
+  for (let s = 0; s < 70; s++) {
+    const a = rnd() * TAU, rad = lerp(0.35, 0.95, rnd()) * R;
+    const x = Math.round(CX + Math.cos(a) * rad), z = Math.round(CZ + Math.sin(a) * rad);
+    if (x < 2 || x >= W - 2 || z < 2 || z >= D - 2) continue;
+    const y0 = ybA[x + W * z];
+    if (y0 <= 3) continue;
+    const sr = rr(2, 4.5), len = ri(6, 18);
+    const crystal = rnd() < 0.35;
+    for (let kk = 1; kk <= len; kk++) {
+      const rr2 = sr * (1 - kk / len);
+      if (rr2 <= 0.15) break;
+      const y = y0 - kk;
+      if (y < 0) break;
+      const tip = crystal && kk > len - 2;
+      for (let dz = Math.ceil(-rr2); dz <= rr2; dz++)
+        for (let dx = Math.ceil(-rr2); dx <= rr2; dx++)
+          if (dx * dx + dz * dz <= rr2 * rr2 + 0.1) set(x + dx, y, z + dz, tip ? PAL.CRYST : PAL.UNDER);
+    }
+  }
+
+  // ---- waterfall spilling off the island edge ----
+  {
+    const fdx = FALL[0] - CX, fdz = FALL[1] - CZ;
+    const fl = Math.sqrt(fdx * fdx + fdz * fdz);
+    const nx = fdx / fl, nz = fdz / fl;      // outward normal
+    const px = -nz, pz = nx;                 // perpendicular (width axis)
+    for (let y = LAKE_Y; y >= 4; y--) {
+      const fallen = LAKE_Y - y;
+      const out = Math.sqrt(fallen) * 0.9;
+      const fx = FALL[0] + nx * out, fz = FALL[1] + nz * out;
+      for (let w = -1.75; w <= 1.75; w += 0.5) {
+        const wx = Math.round(fx + px * w), wz = Math.round(fz + pz * w);
+        if (!inb(wx, y, wz)) continue;
+        const m = y < 12 ? PAL.FOAM : (hash(wx, y, wz) < 0.22 ? PAL.FOAM : PAL.WATER);
+        set(wx, y, wz, m);
+      }
+    }
+  }
+}/* ============================================================
+   03_buildings.js — architecture kit (PROJECT.md §7)
+   All buildings are functions of local coordinates; rotated
+   ones go through oriented2D so they stay crisp voxel art.
+   ============================================================ */
+
+// tower radius given large (>= 20) is a plan-pixel value, small is voxels
+const rad = r => (r >= 20 ? r * S : r);
+// a lit lantern on a short black post
+function lantern(x, y, z) {
+  if (!inb(x, y, z)) return;
+  set(x, y, z, PAL.BLACK);
+  set(x, y + 1, z, PAL.LANT);
+}
+// taller courtyard lamp post
+function lampPost(x, y, z) {
+  if (!inb(x, y, z)) return;
+  set(x, y, z, PAL.BLACK);
+  set(x, y + 1, z, PAL.BLACK);
+  set(x, y + 2, z, PAL.LANT);
+}
+// masonry pier that reaches the ground or the lake bed
+function pierSupport(x, z, yFrom) {
+  for (let y = yFrom; y >= 0; y--) {
+    const m = get(x, y, z);
+    if (m !== 0 && m !== PAL.WATER) break;
+    set(x, y, z, PAL.STONE2);
+  }
+}
+
+/* ------------------------------------------------------------
+   hall(o) — rectangular building (optionally rotated)
+   o: cx, cz, ang, hl, hw, y0, h, roof('gable'|'hip'|'flat'),
+      roofH, win('normal'|'gothic'|'none'), winMat, ev, floorH,
+      buttress, crenel, machi, dormers, litP, arches, stone, trim,
+      roofMat, bright
+   ------------------------------------------------------------ */
+function hall(o) {
+  const cx = o.cx, cz = o.cz, ang = o.ang || 0;
+  const hl = Math.round(o.hl), hw = Math.round(o.hw);
+  const y0 = o.y0 !== undefined ? o.y0 : PLAT_Y;
+  const h = o.h || 20;
+  const roof = o.roof || 'gable';
+  const roofH = o.roofH !== undefined ? o.roofH : hw + 2;
+  const winMode = o.win || 'normal';
+  const winMat = o.winMat !== undefined ? o.winMat : PAL.WIN;
+  const ev = o.ev !== undefined ? o.ev : 3;
+  const floorH = o.floorH || 6;
+  const buttress = o.buttress || 0;
+  const crenel = !!o.crenel, machi = !!o.machi;
+  const dormers = !!o.dormers;
+  const litP = Math.min(1, (o.litP !== undefined ? o.litP : 0.9) + (o.bright ? 0.15 : 0));
+  const stone = o.stone !== undefined ? o.stone : PAL.STONE;
+  const trim = o.trim !== undefined ? o.trim : PAL.STONE3;
+  const roofMat = o.roofMat !== undefined ? o.roofMat : PAL.ROOF;
+  const arches = !!o.arches;
+  const yTop = y0 + h - 1;
+  const lit = (x, y, z) => (hash(x, y, z) < litP * 0.72) ? winMat : PAL.WINDK;
+
+  // ---- footprint: foundation + solid walls, plinth, quoins ----
+  const cols = [];
+  oriented2D(cx, cz, ang, hl, hw, (u, v, x, z) => {
+    cols.push([u, v, x, z]);
+    dropFill(x, z, y0 - 1, PAL.STONE2, 70);
+    const quoin = Math.abs(u) >= hl - 1 && Math.abs(v) >= hw - 1;
+    for (let y = y0; y <= yTop; y++) {
+      let m = stone;
+      if (y <= y0 + 1) m = PAL.STONE2;                       // plinth
+      else if (quoin) m = (Math.floor((y - y0) / 2) % 2 === 0) ? trim : PAL.STONE2;
+      set(x, y, z, m);
+    }
+  });
+  const isShell = (u, v) => Math.abs(u) === hl || Math.abs(v) === hw;
+
+  // ---- string course at every floor ----
+  for (let f = 1; y0 + f * floorH <= yTop; f++) {
+    const y = y0 + f * floorH;
+    for (let i = 0; i < cols.length; i++) {
+      const c = cols[i];
+      if (isShell(c[0], c[1])) set(c[2], y, c[3], PAL.STONE2);
+    }
+  }
+
+  // ---- windows / arcade ----
+  if (winMode !== 'none' && ev > 0) {
+    for (let i = 0; i < cols.length; i++) {
+      const u = cols[i][0], v = cols[i][1], x = cols[i][2], z = cols[i][3];
+      if (!isShell(u, v)) continue;
+      // spacing runs along whichever axis the wall face extends in
+      let pos, lim;
+      if (Math.abs(v) === hw) { pos = u; lim = hl; }
+      else { pos = v; lim = hw; }
+      if (Math.abs(pos) > lim - 2) continue;                 // not within 2 of a corner
+      if (Math.abs(pos) % ev !== 0) continue;
+      for (let f = 0; ; f++) {
+        const fy = y0 + f * floorH;
+        if (fy + 3 > yTop) break;
+        if (arches && f === 0) {                             // open ground-floor arcade
+          for (let y = fy + 1; y <= fy + floorH - 2 && y <= yTop; y++) set(x, y, z, 0);
+          if (fy + floorH - 1 <= yTop) set(x, fy + floorH - 1, z, trim);
+          continue;
+        }
+        if (winMode === 'gothic') {
+          for (let y = fy + 1; y <= Math.min(fy + 6, yTop); y++) {
+            set(x, y, z, ((y - y0) % 9 === 8) ? trim : lit(x, y, z));   // lancet + transom
+          }
+        } else {
+          if (fy + 1 <= yTop) set(x, fy + 1, z, trim);                   // sill
+          if (fy + 2 <= yTop) set(x, fy + 2, z, lit(x, fy + 2, z));
+          if (fy + 3 <= yTop) set(x, fy + 3, z, lit(x, fy + 3, z));
+        }
+      }
+    }
+  }
+
+  // ---- buttresses outside the long walls ----
+  if (buttress > 0) {
+    for (let u = -hl; u <= hl; u++) {
+      if (Math.abs(u) > hl - 1) continue;
+      if (Math.abs((u + hl) % buttress) !== 0) continue;
+      for (const s of [1, -1]) {
+        const w2 = toWorld(cx, cz, ang, u, s * (hw + 1));
+        const x = w2[0], z = w2[1];
+        if (!inb(x, 0, z)) continue;
+        dropFill(x, z, y0 - 1, PAL.STONE2, 70);
+        for (let y = y0; y <= yTop; y++) set(x, y, z, PAL.STONE2);
+        if (yTop + 1 < H) set(x, yTop + 1, z, trim);
+      }
+    }
+  }
+
+  // ---- roofs ----
+  const roofCell = (u, v, x, z, y, m) => { if (y < H) set(x, y, z, m); };
+  if (roof === 'gable') {
+    for (let k = 0; k <= roofH; k++) {
+      const y = y0 + h + k;
+      if (y >= H) break;
+      const lim = Math.floor((hw + 1) * (1 - k / roofH));
+      oriented2D(cx, cz, ang, hl + 1, hw + 1, (u, v, x, z) => {
+        if (Math.abs(u) > hl || Math.abs(v) > lim) return;
+        let m;
+        if (Math.abs(u) === hl && k > 0) {
+          m = trim;                                           // stone gable end
+          if (v === 0 && k === Math.max(1, Math.floor(roofH / 2))) m = PAL.WIN;
+        } else if (k === 0) m = PAL.ROOF2;                   // eave row
+        else if (v === 0 && k >= roofH - 1) m = PAL.ROOF2;   // ridge
+        else m = roofMat;
+        if (dormers && Math.abs(u) < hl && ((u + hl) % 4) === 2 && Math.abs(v) === lim) {
+          if (k === 2) m = lit(x, y, z);                     // dormer window
+          else if (k === 3) m = PAL.ROOF2;                   // dormer cap
+        }
+        roofCell(u, v, x, z, y, m);
+      });
+    }
+  } else if (roof === 'hip') {
+    for (let k = 0; k <= roofH; k++) {
+      const y = y0 + h + k;
+      if (y >= H) break;
+      const limV = Math.floor((hw + 1) * (1 - k / roofH));
+      const limU = Math.floor((hl + 1) * (1 - k / roofH));
+      const tip = (k === roofH);
+      const spireTip = roofH >= (hw + 1) * 2;
+      oriented2D(cx, cz, ang, hl + 1, hw + 1, (u, v, x, z) => {
+        if (Math.abs(u) > limU || Math.abs(v) > limV) return;
+        let m = (k === 0) ? PAL.ROOF2 : roofMat;
+        if (tip) m = spireTip ? PAL.COPPER : PAL.ROOF2;
+        roofCell(u, v, x, z, y, m);
+      });
+    }
+  }
+
+  // ---- machicolation ring + battlements ----
+  if (machi) {
+    oriented2D(cx, cz, ang, hl + 1, hw + 1, (u, v, x, z) => {
+      if (Math.abs(u) <= hl && Math.abs(v) <= hw) return;     // ring only, outside the walls
+      for (let y = yTop - 1; y <= yTop; y++) if (y < H) set(x, y, z, PAL.STONE2);
+    });
+  }
+  if (crenel || roof === 'flat') {
+    const bl = machi ? hl + 1 : hl, bw = machi ? hw + 1 : hw;
+    oriented2D(cx, cz, ang, bl, bw, (u, v, x, z) => {
+      if (!(Math.abs(u) === bl || Math.abs(v) === bw)) return;
+      if (((u + v) & 1) !== 0) return;                       // alternating merlons
+      if (yTop + 1 < H) set(x, yTop + 1, z, trim);
+      if (yTop + 2 < H) set(x, yTop + 2, z, trim);
+    });
+  }
+}
+
+/* ------------------------------------------------------------
+   roundTower(o) — x, z, r, y0, h, cone, coneH, crenel, machi,
+   spire, winN, litP, stone, trim
+   ------------------------------------------------------------ */
+function roundTower(o) {
+  const x = o.x, z = o.z, r = o.r;
+  const y0 = o.y0 !== undefined ? o.y0 : PLAT_Y;
+  const h = o.h || 20;
+  const useCone = o.cone !== false;
+  const coneH = o.coneH !== undefined ? o.coneH : Math.round(2.8 * r + 3);
+  const crenel = !!o.crenel, machi = !!o.machi;
+  const spire = o.spire ? (o.spire === true ? 3 : o.spire) : 0;
+  const winN = o.winN || Math.max(4, Math.round(1.4 * r));
+  const litP = o.litP !== undefined ? o.litP : 0.75;
+  const stone = o.stone !== undefined ? o.stone : PAL.STONE;
+  const trim = o.trim !== undefined ? o.trim : PAL.STONE3;
+  const roofMat = o.roofMat !== undefined ? o.roofMat : PAL.ROOF;
+  const yTop = y0 + h - 1;
+  const r2 = r * r;
+
+  // ---- body: plinth, walls, string courses ----
+  const cells = [];
+  const rad2 = Math.ceil(r) + 1;
+  for (let dz = -rad2; dz <= rad2; dz++)
+    for (let dx = -rad2; dx <= rad2; dx++) {
+      const d = dx * dx + dz * dz;
+      if (d > r2) continue;
+      const wx = x + dx, wz = z + dz;
+      if (!inb(wx, 0, wz)) continue;
+      cells.push([dx, dz, d]);
+      dropFill(wx, wz, y0 - 1, PAL.STONE2, 70);
+      for (let y = y0; y <= yTop; y++) set(wx, y, wz, y <= y0 + 1 ? PAL.STONE2 : stone);
+    }
+  for (let f = 1; y0 + f * 6 <= yTop; f++) {                  // ring string courses
+    const y = y0 + f * 6;
+    for (let i = 0; i < cells.length; i++) {
+      const c = cells[i];
+      if (c[2] >= r2 - (2 * r + 1)) set(x + c[0], y, z + c[1], PAL.STONE2);
+    }
+  }
+
+  // ---- slit windows every 7 rows ----
+  for (let s = 0; s < winN; s++) {
+    const a = (s / winN) * TAU;
+    const wx = Math.round(x + Math.cos(a) * r), wz = Math.round(z + Math.sin(a) * r);
+    if ((wx - x) * (wx - x) + (wz - z) * (wz - z) > r2) continue;
+    for (let wy = y0 + 4; wy <= yTop; wy += 7) {
+      if (wy - 1 >= y0) set(wx, wy - 1, wz, trim);            // sill
+      for (let k = 0; k < 2 && wy + k <= yTop; k++)
+        set(wx, wy + k, wz, hash(wx, wy + k, wz) < litP * 0.72 ? PAL.WIN : PAL.WINDK);
+    }
+  }
+
+  // ---- machicolation ring + battlement ----
+  const ringR2 = (r + 1) * (r + 1);
+  if (machi) {
+    for (let dz = -rad2 - 1; dz <= rad2 + 1; dz++)
+      for (let dx = -rad2 - 1; dx <= rad2 + 1; dx++) {
+        const d = dx * dx + dz * dz;
+        if (d <= r2 || d > ringR2) continue;
+        for (let y = yTop - 1; y <= yTop; y++) if (y < H) set(x + dx, y, z + dz, PAL.STONE2);
+      }
+  }
+  if (crenel) {
+    const nB = Math.max(10, Math.round(TAU * Math.max(r, 1.5)));
+    const band = [];
+    for (let i = 0; i < cells.length; i++)
+      if (cells[i][2] >= (r - 1) * (r - 1) && cells[i][2] <= ringR2) band.push(cells[i]);
+    for (let i = 0; i < band.length; i++)                     // continuous parapet course
+      if (yTop + 1 < H) set(x + band[i][0], yTop + 1, z + band[i][1], trim);
+    for (let b = 0; b < nB; b += 2) {                         // alternating merlons
+      const a = (b + 0.5) / nB * TAU;
+      const mx = x + Math.round(Math.cos(a) * (r - 0.3));
+      const mz = z + Math.round(Math.sin(a) * (r - 0.3));
+      if ((mx - x) * (mx - x) + (mz - z) * (mz - z) > r2) continue;
+      if (yTop + 2 < H) set(mx, yTop + 2, mz, trim);
+    }
+  }
+
+  // ---- stepped cone roof ----
+  if (useCone) {
+    const baseY = (crenel ? yTop + 3 : yTop + 1);
+    const R0 = crenel ? Math.max(1, r - 0.6) : r + 1.2;
+    const coneCells = [];
+    for (let k = 0; k <= coneH; k++) {
+      const y = baseY + k;
+      if (y >= H) break;
+      const rr = R0 * Math.pow(Math.max(0, 1 - k / coneH), 1.08);
+      const cr2 = rr * rr;
+      const lim = Math.ceil(rr);
+      for (let dz = -lim; dz <= lim; dz++)
+        for (let dx = -lim; dx <= lim; dx++) {
+          if (dx * dx + dz * dz > cr2) continue;
+          let m = roofMat;
+          if (k === 0) m = PAL.ROOF2;                          // eave ring
+          else if (k === coneH || (rr < 0.8 && k === coneH - 1)) m = PAL.COPPER;
+          set(x + dx, y, z + dz, m);
+        }
+      if (k < coneH && rr >= 1.5) coneCells.push([k, y, rr]);
+    }
+    // tiny lit dormers on the cone every 6 rows, 8 per ring
+    for (let i = 0; i < coneCells.length; i++) {
+      const c = coneCells[i];
+      if (c[0] % 6 !== 0 || c[0] === 0) continue;
+      for (let s = 0; s < 8; s++) {
+        const a = (s + 0.5) / 8 * TAU;
+        const wx = x + Math.round(Math.cos(a) * c[2]);
+        const wz = z + Math.round(Math.sin(a) * c[2]);
+        if ((wx - x) * (wx - x) + (wz - z) * (wz - z) > c[2] * c[2] + 1) continue;
+        set(wx, c[1], wz, hash(wx, c[1], wz) < 0.6 * 0.72 ? PAL.WIN : PAL.WINDK);
+      }
+    }
+    // spire column ending in copper
+    if (spire) {
+      for (let k = 1; k <= spire; k++) {
+        const y = baseY + coneH + k;
+        if (y >= H) break;
+        set(x, y, z, k === spire ? PAL.COPPER : PAL.ROOF2);
+      }
+    }
+  }
+}
+
+/* ------------------------------------------------------------
+   squareTower(o) — a hall with hl = hw = s and a hip roof,
+   plus optional corner pinnacles (trim shaft + spike + copper).
+   o: cx, cz, ang, s, y0, h, roofH, pinnacles, win, crenel, machi…
+   ------------------------------------------------------------ */
+function squareTower(o) {
+  const p = Object.assign({}, o, { hl: o.s, hw: o.s, roof: o.roof || 'hip' });
+  hall(p);
+  if (o.pinnacles) {
+    const n = o.pinnacles === true ? 4 : o.pinnacles;
+    const y0 = o.y0 !== undefined ? o.y0 : PLAT_Y;
+    const yBase = y0 + (o.h || 20);
+    const s = Math.round(o.s), ang = o.ang || 0;
+    for (const c of [[s, s], [s, -s], [-s, s], [-s, -s]]) {
+      const w2 = toWorld(o.cx, o.cz, ang, c[0], c[1]);
+      const x = w2[0], z = w2[1];
+      if (!inb(x, 0, z)) continue;
+      for (let y = yBase; y < yBase + n && y < H; y++) set(x, y, z, PAL.STONE3);
+      if (yBase + n < H) set(x, yBase + n, z, PAL.ROOF2);
+      if (yBase + n + 1 < H) set(x, yBase + n + 1, z, PAL.ROOF2);
+      if (yBase + n + 2 < H) set(x, yBase + n + 2, z, PAL.COPPER);
+    }
+  }
+}
+
+/* ------------------------------------------------------------
+   bridge(o) — x0,z0 → x1,z1 at deck height y, width w.
+   stone: piers every pierEvery + shallow arch masonry
+   truss: posts + diagonal lattice (wooden covered bridge)
+   ------------------------------------------------------------ */
+function bridge(o) {
+  const x0 = o.x0, z0 = o.z0, x1 = o.x1, z1 = o.z1;
+  const y = o.y;
+  const w = o.w || 3;
+  const truss = !!o.truss;
+  const deckM = o.deck !== undefined ? o.deck : (truss ? PAL.WOOD2 : PAL.STONE3);
+  const parapet = o.parapet !== false && !o.roof;
+  const lantEvery = o.lanterns || 0;
+  const cov = o.roof;
+  const pierEvery = o.pierEvery || 0;
+  const archH = o.arch !== undefined ? o.arch : (truss ? 0 : 3);
+
+  const dx = x1 - x0, dz = z1 - z0;
+  const len = Math.sqrt(dx * dx + dz * dz) || 1;
+  const nx = -dz / len, nz = dx / len;
+  const steps = Math.max(Math.abs(x1 - x0), Math.abs(z1 - z0), 1);
+  const bay = pierEvery > 0 ? pierEvery : 5;
+
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const bx = lerp(x0, x1, t), bz = lerp(z0, z1, t);
+    for (let j = 0; j < w; j++) {
+      const off = j - (w - 1) / 2;
+      const px = Math.round(bx + nx * off), pz = Math.round(bz + nz * off);
+      set(px, y, pz, deckM);
+      if (cov) {                                               // enclosed corridor walls
+        if (j === 0 || j === w - 1) {
+          set(px, y + 1, pz, truss ? PAL.WOOD : PAL.STONE2);
+          set(px, y + 2, pz, truss ? PAL.WOOD : PAL.STONE2);
+        }
+      } else if (parapet && (j === 0 || j === w - 1)) {
+        set(px, y + 1, pz, truss ? PAL.WOOD : PAL.STONE2);
+        if (lantEvery > 0 && i % lantEvery === 0 && j === 0) lantern(px, y + 2, pz);
+      }
+    }
+    // substructure
+    if (truss) {
+      if (i % bay === 0) {                                     // posts down to the ground
+        for (let j = 0; j < w; j += w - 1) {
+          const off = j - (w - 1) / 2;
+          const px = Math.round(bx + nx * off), pz = Math.round(bz + nz * off);
+          dropFill(px, pz, y - 1, PAL.WOOD, 70);
+        }
+      }
+      // diagonal lattice: crossing chords under the deck
+      const ph = (i % bay) / bay;
+      const saw = p => (p < 0.5 ? p * 2 : 2 - p * 2);
+      const dA = Math.round(4 * saw(ph));
+      const dB = Math.round(4 * saw((ph + 0.5) % 1));
+      const dep = Math.max(dA, dB);
+      for (let d = 1; d <= dep; d++) {
+        for (let j = 0; j < w; j++) {
+          const off = j - (w - 1) / 2;
+          const px = Math.round(bx + nx * off), pz = Math.round(bz + nz * off);
+          if (d <= dA || d <= dB) set(px, y - d, pz, PAL.WOOD);
+        }
+      }
+    } else if (pierEvery > 0) {
+      if (i % pierEvery === 0) {                               // piers
+        for (let j = 0; j < w; j++) {
+          const off = j - (w - 1) / 2;
+          const px = Math.round(bx + nx * off), pz = Math.round(bz + nz * off);
+          dropFill(px, pz, y - 1, PAL.STONE2, 70);
+        }
+      } else if (archH > 0) {                                  // shallow arch masonry
+        const ph = (i % pierEvery) / pierEvery;
+        const dep = Math.max(0, Math.round(archH * Math.sin(Math.PI * ph)));
+        for (let d = 1; d <= dep; d++)
+          for (let j = 0; j < w; j++) {
+            const off = j - (w - 1) / 2;
+            const px = Math.round(bx + nx * off), pz = Math.round(bz + nz * off);
+            set(px, y - d, pz, PAL.STONE2);
+          }
+      }
+    }
+  }
+
+  // covered gable roof
+  if (cov) {
+    const rh = cov === true ? 3 : cov;
+    const rw = Math.ceil(w / 2);
+    for (let k = 0; k <= rh; k++) {
+      const yv = y + 3 + k;
+      if (yv >= H) break;
+      const lim = Math.floor((rw + 1) * (1 - k / rh));
+      for (let s = 0; s <= steps; s++) {
+        const t = s / steps;
+        const bx = lerp(x0, x1, t), bz = lerp(z0, z1, t);
+        for (let j = 0; j < w; j++) {
+          const off = j - (w - 1) / 2;
+          if (Math.abs(off) > lim) continue;
+          const px = Math.round(bx + nx * off), pz = Math.round(bz + nz * off);
+          set(px, yv, pz, (k === 0 || Math.abs(off) === lim && k === rh) ? PAL.ROOF2 : PAL.ROOF);
+        }
+      }
+    }
+  }
+}
+
+/* ------------------------------------------------------------
+   stairPath(pts, yA, yB, w, lantEvery) — lantern staircase.
+   Walks a polyline, interpolates height yA → yB, carves 5 voxels
+   of headroom, drops stone supports to the ground or lake bed,
+   adds parapets and lantern posts.
+   ------------------------------------------------------------ */
+function stairPath(pts, yA, yB, w = 3, lantEvery = 5) {
+  const segs = [];
+  let total = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const L = Math.max(Math.abs(pts[i + 1][0] - pts[i][0]),
+                       Math.abs(pts[i + 1][1] - pts[i][1]), 1);
+    segs.push(L); total += L;
+  }
+  let walked = 0, stepNo = 0;
+  for (let s = 0; s < segs.length; s++) {
+    const x0 = pts[s][0], z0 = pts[s][1], x1 = pts[s + 1][0], z1 = pts[s + 1][1];
+    const L = segs[s];
+    const dx = x1 - x0, dz = z1 - z0;
+    const ll = Math.sqrt(dx * dx + dz * dz) || 1;
+    const nx = -dz / ll, nz = dx / ll;
+    for (let i = 0; i < L; i++) {
+      const g = (walked + i) / total;
+      const t = i / L;
+      const bx = lerp(x0, x1, t), bz = lerp(z0, z1, t);
+      const y = Math.round(lerp(yA, yB, g));
+      for (let j = 0; j < w; j++) {
+        const off = j - (w - 1) / 2;
+        const px = Math.round(bx + nx * off), pz = Math.round(bz + nz * off);
+        if (!inb(px, y, pz)) continue;
+        set(px, y, pz, PAL.STONE3);                            // step deck
+        if (j === 0 || j === w - 1) {
+          set(px, y + 1, pz, PAL.STONE2);                      // parapet
+          pierSupport(px, pz, y - 1);                          // pier to bed / ground
+        } else {
+          for (let c = 1; c <= 5; c++) set(px, y + 1 + c, pz, 0); // headroom
+        }
+      }
+      if (lantEvery > 0 && stepNo % lantEvery === 0) {
+        const side = (Math.floor(stepNo / lantEvery) % 2 === 0) ? 0 : w - 1;
+        const off = side - (w - 1) / 2;
+        const px = Math.round(bx + nx * off), pz = Math.round(bz + nz * off);
+        lantern(px, y + 2, pz);
+      }
+      stepNo++;
+    }
+    walked += L;
+  }
+}/* ============================================================
+   04_castle.js — Hogwarts layout (PROJECT.md §8)
+   All coordinates are plan px (2000 px plan, north up);
+   h = wall height in voxels above PLAT_Y.
+   ============================================================ */
+
+// plan-rect → hall centred/sized in voxels
+function hallRect(x0, z0, x1, z1, o) {
+  return hall(Object.assign({
+    cx: PX((x0 + x1) / 2), cz: PZ((z0 + z1) / 2),
+    hl: Math.round((x1 - x0) * S / 2), hw: Math.round((z1 - z0) * S / 2)
+  }, o));
+}
+// gravel / paving strip between two plan points
+function strip(x0, z0, x1, z1, w, m) {
+  const a = [PX(x0), PZ(z0)], b = [PX(x1), PZ(z1)];
+  const dx = b[0] - a[0], dz = b[1] - a[1];
+  const ll = Math.sqrt(dx * dx + dz * dz) || 1;
+  const nx = -dz / ll, nz = dx / ll;
+  line2(a[0], a[1], b[0], b[1], (x, z) => {
+    for (let j = 0; j < w; j++) {
+      const off = j - (w - 1) / 2;
+      set(Math.round(x + nx * off), PLAT_Y - 1, Math.round(z + nz * off), m);
+    }
+  });
+}
+// crenellated curtain wall (y0 = wall base; omitted → follows terrain)
+function wallLine(x0, z0, x1, z1, h, w = 1, y0) {
+  let i = 0;
+  line2(x0, z0, x1, z1, (x, z) => {
+    const base = (y0 !== undefined) ? y0 : surf(x, z);
+    if (base >= 0) {
+      for (let j = 0; j < w; j++)
+        for (let y = base; y <= base + h - 1; y++) set(x + j, y, z, PAL.STONE2);
+      if (i % 2 === 0) {
+        for (let j = 0; j < w; j++) {
+          set(x + j, base + h, z, PAL.STONE3);
+          set(x + j, base + h + 1, z, PAL.STONE3);
+        }
+      }
+    }
+    i++;
+  });
+}
+// fountain with a warm point light
+function fountain(px, py) {
+  const x = PX(px), z = PZ(py), y = PLAT_Y - 1;
+  for (let dz = -4; dz <= 4; dz++)
+    for (let dx = -4; dx <= 4; dx++) {
+      const d = dx * dx + dz * dz;
+      if (d > 16) continue;
+      set(x + dx, y, z + dz, d <= 4 ? PAL.WATER : PAL.STONE3);
+    }
+  set(x, y + 1, z, PAL.STONE3);
+  set(x, y + 2, z, PAL.WATER);
+  LIGHTS.push({ x, y: y + 4, z, s: 1 });
+}
+
+function buildCastle() {
+  /* ============ Greenhouse compound (NE) ============ */
+  strip(1125, 570, 1460, 570, 3, PAL.GRAVEL);
+  strip(1347, 450, 1347, 1015, 3, PAL.GRAVEL);
+  strip(1120, 920, 1580, 920, 3, PAL.GRAVEL);
+  wallLine(PX(1120), PZ(450), PX(1580), PZ(450), 6, 1, PLAT_Y - 1);
+  wallLine(PX(1580), PZ(450), PX(1580), PZ(1020), 6, 1, PLAT_Y - 1);
+
+  const greenhouses = [
+    [1130, 470, 1300, 505], [1130, 530, 1300, 560],
+    [1395, 470, 1560, 505], [1395, 530, 1560, 560],
+    [1470, 580, 1510, 730], [1525, 580, 1565, 730],
+    [1470, 745, 1510, 890], [1525, 745, 1565, 890]
+  ];
+  for (const g of greenhouses) greenhouse(g[0], g[1], g[2], g[3]);
+
+  // octagonal glass pavilion with a gold finial
+  {
+    const x = PX(1350), z = PZ(448), y0 = PLAT_Y;
+    const pr = 5;
+    for (let y = y0; y <= y0 + 4; y++) {                    // glass drum walls
+      for (let dz = -pr; dz <= pr; dz++)
+        for (let dx = -pr; dx <= pr; dx++) {
+          const d = dx * dx + dz * dz;
+          if (d > pr * pr || (y > y0 && d <= (pr - 1) * (pr - 1))) continue;
+          set(x + dx, y, z + dz, y === y0 ? PAL.STONE3 : PAL.GLASS);
+        }
+    }
+    for (let k = 0; k <= 4; k++) {
+      const rr = pr * (1 - k / 5);
+      disk(x, z, rr, y0 + 5 + k, PAL.GLASS);
+    }
+    set(x, y0 + 10, z, PAL.GOLD);
+    set(x, y0 + 11, z, PAL.GOLD);
+    LIGHTS.push({ x, y: y0 + 6, z, s: 0.8 });
+  }
+
+  /* ============ North quadrangle ============ */
+  hallRect(960, 605, 1275, 680, { h: 24, dormers: true });
+  hallRect(960, 605, 1030, 915, { h: 24 });
+  cloister(1032, 682, 1270, 910, 1060, 700, 1240, 880);
+  fountain(1150, 790);
+  lampPost(PX(1070), PLAT_Y, PZ(710));
+  lampPost(PX(1230), PLAT_Y, PZ(710));
+  lampPost(PX(1070), PLAT_Y, PZ(870));
+  lampPost(PX(1230), PLAT_Y, PZ(870));
+  LIGHTS.push({ x: PX(1060), y: PLAT_Y + 4, z: PZ(700), s: 0.7 });
+
+  /* ============ Spine & gothic towers ============ */
+  hallRect(1275, 590, 1425, 910, { h: 26, roofH: 11, buttress: 4, dormers: true });
+  hallRect(1310, 905, 1390, 1150, { h: 22 });
+  squareTower({ cx: PX(1280), cz: PZ(612), s: 4, h: 40, roofH: 24, win: 'gothic', pinnacles: 9 });
+  squareTower({ cx: PX(1410), cz: PZ(612), s: 4, h: 40, roofH: 24, win: 'gothic', pinnacles: 9 });
+  squareTower({ cx: PX(1345), cz: PZ(598), s: 3, h: 36, roofH: 34, win: 'gothic' });
+  hallRect(1220, 910, 1500, 1030, { h: 24 });
+  squareTower({ cx: PX(1350), cz: PZ(958), s: 6, h: 34, roofH: 16, pinnacles: true });
+  hallRect(1225, 1055, 1500, 1145, { h: 22, buttress: 3 });
+  roundTower({ x: PX(1215), z: PZ(1062), r: rad(30), h: 30 });
+  roundTower({ x: PX(1480), z: PZ(1062), r: rad(30), h: 30 });
+  roundTower({ x: PX(1215), z: PZ(1142), r: rad(36), h: 26, crenel: true, cone: false });
+  roundTower({ x: PX(1480), z: PZ(1142), r: rad(36), h: 26, crenel: true, cone: false });
+
+  /* ============ Fountain plaza ============ */
+  for (let x = PX(1095); x <= PX(1220); x++)
+    for (let z = PZ(905); z <= PZ(1025); z++) set(x, PLAT_Y - 1, z, PAL.STONE3);
+  fountain(1157, 965);
+
+  /* ============ West blocks ============ */
+  hallRect(1000, 915, 1075, 1030, { h: 24 });
+  hallRect(890, 960, 1000, 1030, { h: 20 });
+  roundTower({ x: PX(945), z: PZ(1035), r: rad(55), h: 20, coneH: 13 });
+  roundTower({ x: PX(897), z: PZ(960), r: 2.5, h: 27 });
+  roundTower({ x: PX(1000), z: PZ(953), r: 2.5, h: 29 });
+  roundTower({ x: PX(945), z: PZ(920), r: 2.5, h: 31 });
+  bridge({ x0: PX(885), z0: PZ(990), x1: PX(575), z1: PZ(968), y: PLAT_Y - 1, w: 3, lanterns: 6, pierEvery: 10 });
+  roundTower({ x: PX(560), z: PZ(966), r: 3, h: 10, cone: false, crenel: true });
+
+  /* ============ NW angled wing & grounds ============ */
+  hall({ cx: PX(830), cz: PZ(605), ang: -22 * DEG, hl: 11, hw: 7, h: 28, dormers: true, buttress: 3 });
+  hall({ cx: PX(890), cz: PZ(700), ang: 19 * DEG, hl: 12, hw: 3, h: 20 });
+  roundTower({ x: PX(848), z: PZ(745), r: 3, h: 26 });
+  roundTower({ x: PX(922), z: PZ(770), r: 3, h: 24 });
+  squareTower({ cx: PX(735), cz: PZ(575), ang: -22 * DEG, s: 3, h: 36, roofH: 22 });
+  hall({ cx: PX(1100), cz: PZ(420), ang: -25 * DEG, hl: 7, hw: 4, h: 14 });
+  roundTower({ x: PX(1155), z: PZ(405), r: 2.5, h: 20 });
+  hallRect(1080, 465, 1122, 605, { h: 12 });
+
+  // rampart following the terrain, turrets at the vertices
+  const RP = [[1090, 380], [990, 190], [945, 165], [885, 140], [670, 150], [535, 345], [505, 405]];
+  for (let i = 0; i < RP.length - 1; i++)
+    wallLine(PX(RP[i][0]), PZ(RP[i][1]), PX(RP[i + 1][0]), PZ(RP[i + 1][1]), 6, 1);
+  for (let i = 0; i < RP.length - 1; i++) {
+    const x = PX(RP[i][0]), z = PZ(RP[i][1]);
+    const s = surf(x, z);
+    if (s > 0) roundTower({ x, z, r: 2.6, h: 12, y0: s + 1 });
+  }
+  // owlery at the rampart's end
+  {
+    const x = PX(505), z = PZ(405), s = surf(x, z);
+    if (s > 0) roundTower({ x, z, r: 4.5, h: 30, coneH: 14, y0: s + 1, winN: 14, litP: 0.18 });
+  }
+
+  /* ============ Courtyard block, Clock & Astronomy towers ============ */
+  hallRect(780, 1180, 1060, 1265, { h: 26, buttress: 3 });
+  hallRect(780, 1180, 860, 1500, { h: 26 });
+  hallRect(780, 1420, 1040, 1500, { h: 24, arches: true });
+  hallRect(1040, 1235, 1120, 1420, { h: 26 });
+  for (let x = PX(860); x <= PX(1040); x++)
+    for (let z = PZ(1265); z <= PZ(1420); z++) set(x, PLAT_Y - 1, z, PAL.STONE3);
+  fountain(950, 1340);
+  lampPost(PX(880), PLAT_Y, PZ(1285));
+  lampPost(PX(1020), PLAT_Y, PZ(1285));
+  lampPost(PX(880), PLAT_Y, PZ(1400));
+  lampPost(PX(1020), PLAT_Y, PZ(1400));
+  roundTower({ x: PX(775), z: PZ(1182), r: rad(42), h: 32 });
+  roundTower({ x: PX(775), z: PZ(1495), r: rad(42), h: 30 });
+  roundTower({ x: PX(1105), z: PZ(1235), r: rad(45), h: 34 });
+  roundTower({ x: PX(1000), z: PZ(1168), r: 2.5, h: 14 });
+  roundTower({ x: PX(1065), z: PZ(1168), r: 2.5, h: 14 });
+  roundTower({ x: PX(1060), z: PZ(1545), r: 2.5, h: 14 });
+
+  // Clock Tower
+  const ct = { cx: PX(795), cz: PZ(1340), s: 5, h: 44, roofH: 18, pinnacles: true };
+  squareTower(ct);
+  for (const sg of [1, -1])                                 // clock faces W & E at +36
+    for (let dv = -3; dv <= 3; dv++)
+      for (let dy = -3; dy <= 3; dy++) {
+        const d2 = dv * dv + dy * dy;
+        if (d2 > 9) continue;
+        const w2 = toWorld(ct.cx, ct.cz, 0, sg * ct.s, dv);
+        const y = PLAT_Y + 36 + dy;
+        set(w2[0], y, w2[1], d2 >= 6 ? PAL.GOLD : PAL.CLOCK);
+      }
+  for (const sg of [1, -1]) {                               // black hands
+    const face = (dv, dy) => {
+      const p = toWorld(ct.cx, ct.cz, 0, sg * ct.s, dv);
+      set(p[0], PLAT_Y + 36 + dy, p[1], PAL.BLACK);
+    };
+    face(0, 0); face(0, 1); face(0, 2);                     // vertical hand
+    face(1, 0); face(2, 0);                                 // horizontal hand
+  }
+  LIGHTS.push({ x: ct.cx, y: PLAT_Y + 38, z: ct.cz, s: 1.2 });
+
+  // Astronomy Tower — the tallest point
+  const at = { x: PX(1100), z: PZ(1490), r: 10, h: 44, machi: true, crenel: true, coneH: 42, spire: 5 };
+  roundTower(at);
+  roundTower({ x: at.x - 7, z: at.z - 5, r: 1.5, h: 7, coneH: 4, y0: PLAT_Y + 41 });
+  roundTower({ x: at.x - 4, z: at.z - 8, r: 1.5, h: 7, coneH: 4, y0: PLAT_Y + 41 });
+  LIGHTS.push({ x: at.x, y: PLAT_Y + 47, z: at.z, s: 1.3 });
+
+  /* ============ Clock-tower courtyard (W) & wooden bridge ============ */
+  hallRect(595, 1255, 700, 1420, { h: 22, dormers: true });
+  wallLine(PX(405), PZ(1240), PX(715), PZ(1240), 10, 1, PLAT_Y - 1);
+  wallLine(PX(405), PZ(1435), PX(715), PZ(1435), 10, 1, PLAT_Y - 1);
+  wallLine(PX(405), PZ(1240), PX(405), PZ(1320), 12, 1, PLAT_Y - 1);   // west wall with gate
+  wallLine(PX(405), PZ(1360), PX(405), PZ(1435), 12, 1, PLAT_Y - 1);
+  roundTower({ x: PX(425), z: PZ(1262), r: 2.5, h: 14 });
+  roundTower({ x: PX(425), z: PZ(1412), r: 2.5, h: 14 });
+  for (let x = PX(430); x <= PX(590); x++)
+    for (let z = PZ(1265); z <= PZ(1420); z++) set(x, PLAT_Y - 1, z, PAL.STONE3);
+  fountain(525, 1338);
+  hallRect(700, 1334, 782, 1346, { h: 12 });                 // covered stone passage
+
+  // covered wooden bridge west to a small tower
+  bridge({ x0: PX(422), z0: PZ(1340), x1: PX(240), z1: PZ(1340), y: PLAT_Y - 1, w: 3, truss: true, roof: true, pierEvery: 6 });
+  {
+    // end tower reaches from its masonry pillar up to the deck level
+    const x = PX(232), z = PZ(1340);
+    roundTower({ x, z, r: 3, h: 10, y0: PLAT_Y - 10, cone: false, crenel: true });
+  }
+
+  /* ============ Great Hall ============ */
+  {
+    const gx = PX(1125), gz = PZ(1655), ga = -34.9 * DEG;
+    hall({
+      cx: gx, cz: gz, ang: ga, hl: 24, hw: 5, h: 28, roof: 'gable', roofH: 10,
+      win: 'gothic', winMat: PAL.WIN2, litP: 0.9, buttress: 3, floorH: 7
+    });
+    // paved terrace two voxels around
+    oriented2D(gx, gz, ga, 27, 8, (u, v, x, z) => {
+      if (Math.abs(u) <= 24 && Math.abs(v) <= 5) return;
+      if (inb(x, PLAT_Y - 1, z)) set(x, PLAT_Y - 1, z, PAL.STONE3);
+    });
+    // round stair tower at local (8,8)
+    const st = toWorld(gx, gz, ga, 8, 8);
+    roundTower({ x: st[0], z: st[1], r: 3, h: 34 });
+    // copper flèche on the ridge
+    const fl = toWorld(gx, gz, ga, 0, 0);
+    for (let y = PLAT_Y + 38; y <= PLAT_Y + 43; y++)
+      if (y < H) set(fl[0], y, fl[1], y >= PLAT_Y + 42 ? PAL.COPPER : PAL.ROOF2);
+    // corner pinnacles at both gable ends
+    for (const sgn of [1, -1])
+      for (const cn of [1, -1]) {
+        const p = toWorld(gx, gz, ga, sgn * 24, cn * 5);
+        for (let y = PLAT_Y + 28; y < PLAT_Y + 33; y++) if (y < H) set(p[0], y, p[1], PAL.STONE3);
+        if (PLAT_Y + 33 < H) set(p[0], PLAT_Y + 33, p[1], PAL.ROOF2);
+        if (PLAT_Y + 34 < H) set(p[0], PLAT_Y + 34, p[1], PAL.COPPER);
+      }
+    LIGHTS.push({ x: gx, y: PLAT_Y + 14, z: gz, s: 1.4 });
+  }
+
+  /* ============ Bridges & stairs ============ */
+  bridge({ x0: PX(1340), z0: PZ(1170), x1: PX(1250), z1: PZ(1465), y: PLAT_Y - 1, w: 3, lanterns: 5, pierEvery: 8 });
+  bridge({ x0: PX(1145), z0: PZ(1215), x1: PX(1205), z1: PZ(1160), y: PLAT_Y + 12, w: 3, roof: true, parapet: false });
+
+  // lantern staircase down to the boathouse
+  const STAIR = [[1330, 1590], [1370, 1690], [1470, 1700], [1500, 1630], [1600, 1600], [1690, 1600], [1760, 1650]];
+  stairPath(STAIR.map(p => [PX(p[0]), PZ(p[1])]), PLAT_Y, LAKE_Y + 2, 3, 5);
+
+  /* ============ Boathouse ============ */
+  {
+    const bx = PX(1805), bz = PZ(1700);
+    hall({ cx: bx, cz: bz, ang: Math.PI / 2, hl: 6, hw: 3, h: 8, y0: LAKE_Y + 3, litP: 0.8 });
+    roundTower({ x: bx + 7, z: bz + 6, r: 2.5, h: 12, y0: LAKE_Y + 3 });
+    // two wooden piers with lanterns reaching into the lake
+    for (const px of [1795, 1840]) {
+      const pz0 = PZ(1735), pz1 = PZ(1815);
+      const x = PX(px);
+      line2(x, pz0, x, pz1, (px2, pz2, t) => {
+        set(px2 - 1, LAKE_Y + 1, pz2, PAL.WOOD2);
+        set(px2, LAKE_Y + 1, pz2, PAL.WOOD2);
+        set(px2 + 1, LAKE_Y + 1, pz2, PAL.WOOD2);
+        if (Math.round(t * 10) % 3 === 0) {
+          pierSupport(px2 - 1, pz2, LAKE_Y);
+          pierSupport(px2 + 1, pz2, LAKE_Y);
+        }
+        if (Math.round(t * 10) % 4 === 0) lantern(px2 - 1, LAKE_Y + 2, pz2);
+      });
+    }
+    LIGHTS.push({ x: bx, y: LAKE_Y + 6, z: bz, s: 1 });
+  }
+}
+
+/* ------------------------------------------------------------
+   greenhouse — 3-high glass walls, iron posts every 4,
+   stepped glass roof with iron ribs, plants and one lantern
+   ------------------------------------------------------------ */
+function greenhouse(px0, pz0, px1, pz1) {
+  const cx = PX((px0 + px1) / 2), cz = PZ((pz0 + pz1) / 2);
+  const hl = Math.max(2, Math.round((px1 - px0) * S / 2));
+  const hw = Math.max(2, Math.round((pz1 - pz0) * S / 2));
+  const y0 = PLAT_Y, wallH = 3;
+  oriented2D(cx, cz, 0, hl, hw, (u, v, x, z) => {
+    dropFill(x, z, y0 - 1, PAL.STONE2, 8);
+    if (Math.abs(u) === hl || Math.abs(v) === hw) {           // glass walls + iron posts
+      for (let y = y0; y < y0 + wallH; y++)
+        set(x, y, z, (Math.abs((u + v) % 4) === 0) ? PAL.IRON : PAL.GLASS);
+    } else {                                                  // soil + plants
+      set(x, y0 - 1, z, PAL.DIRT);
+      if (hash(x, 1, z) < 0.65) set(x, y0, z, PAL.PLANT);
+    }
+  });
+  // stepped glass roof with iron ribs
+  const roofH = Math.max(2, hw);
+  for (let k = 0; k <= roofH; k++) {
+    const y = y0 + wallH + k;
+    if (y >= H) break;
+    const limU = Math.floor(hl * (1 - k / (roofH + 1)));
+    const limV = Math.floor(hw * (1 - k / roofH));
+    oriented2D(cx, cz, 0, hl, hw, (u, v, x, z) => {
+      if (Math.abs(u) > limU || Math.abs(v) > limV) return;
+      const rib = (Math.abs(u) % 4 === 0) || (Math.abs(v) % 4 === 0) || (k === roofH);
+      set(x, y, z, rib ? PAL.IRON : PAL.GLASS);
+    });
+  }
+  lantern(cx, y0, cz + hw + 1);                              // one lantern at the door
+}
+
+/* ------------------------------------------------------------
+   cloister — covered walkway ring: pillars every 3,
+   stone slab at +5, ROOF2 roof at +6
+   ------------------------------------------------------------ */
+function cloister(ox0, oz0, ox1, oz1, ix0, iz0, ix1, iz1) {
+  const O = [PX(ox0), PZ(oz0), PX(ox1), PZ(oz1)];
+  const I = [PX(ix0), PZ(iz0), PX(ix1), PZ(iz1)];
+  for (let z = O[1]; z <= O[3]; z++)
+    for (let x = O[0]; x <= O[2]; x++) {
+      if (x >= I[0] && x <= I[2] && z >= I[1] && z <= I[3]) continue;  // inner lawn
+      const s = PLAT_Y - 1;
+      set(x, s, z, PAL.STONE3);
+      const outer = x <= O[0] + 1 || x >= O[2] - 1 || z <= O[1] + 1 || z >= O[3] - 1;
+      const inner = x <= I[0] + 1 || x >= I[2] - 1 || z <= I[1] + 1 || z >= I[3] - 1;
+      if (outer || inner) {
+        const along = (x <= O[0] + 1 || x >= O[2] - 1 || x <= I[0] + 1 || x >= I[2] - 1) ? z : x;
+        if (Math.abs(along % 3) === 0)
+          for (let y = s + 1; y <= s + 4; y++) set(x, y, z, PAL.STONE2);
+      }
+      set(x, s + 5, z, PAL.STONE3);                            // slab
+      set(x, s + 6, z, PAL.ROOF2);                             // roof
+    }
+}/* ============================================================
+   05_grounds.js — forest, Quidditch pitch, Hagrid's hut, willow,
+   stone circle, boats, squid, train  (PROJECT.md §9)
+   ============================================================ */
+
+const QX = PX(800), QZ = PZ(330);          // Quidditch pitch centre (voxel)
+
+function buildGrounds() {
+  buildQuidditchPitch();
+  buildHagridHut();
+  buildStoneCircle();
+  buildWillow();
+  buildPaths();
+  buildForest();
+  buildCliffBushes();
+  buildBoats();
+  buildSquid();
+  buildStation();
+}
+
+/* ---------------- Quidditch pitch ---------------- */
+function buildQuidditchPitch() {
+  const a = 24, b = 13, s = surf(QX, QZ);
+  if (s < 0) return;
+
+  // elliptical field with mowing stripes, centre ring, sand rim
+  for (let dz = -b - 3; dz <= b + 3; dz++)
+    for (let dx = -a - 3; dx <= a + 3; dx++) {
+      const x = QX + dx, z = QZ + dz;
+      if (x < 0 || x >= W || z < 0 || z >= D) continue;
+      const t = (dx * dx) / (a * a) + (dz * dz) / (b * b);
+      const g = surf(x, z);
+      if (g < 0 || get(x, g, z) === PAL.WATER) continue;
+      if (t <= 1) {
+        set(x, g, z, (Math.floor(z / 3) % 2 === 0) ? PAL.GRASS : PAL.GRASS2);   // stripes
+        const ring = (dx * dx) / 36 + (dz * dz) / 16;                            // centre ring
+        if (ring > 0.55 && ring < 1.45) set(x, g, z, PAL.PATH);
+      } else if (t <= 1.55) {
+        set(x, g, z, PAL.SAND);                                                  // sand rim
+      }
+    }
+
+  // 3 gold hoops per end (heights 9/12/9, ring r2)
+  for (const sg of [1, -1]) {
+    let k = 0;
+    for (const zo of [-8, 0, 8]) {
+      const hx = Math.round(QX + sg * 20), hz = QZ + zo;
+      const hh = [9, 12, 9][k++];
+      const gy = s + 1;
+      for (let y = gy; y <= gy + hh - 3; y++) set(hx, y, hz, PAL.GOLD);           // pole
+      const ry = gy + hh - 2;
+      for (let dy = -3; dy <= 3; dy++)
+        for (let dz = -3; dz <= 3; dz++) {
+          const d2 = dy * dy + dz * dz;
+          if (d2 <= 6.3 && d2 >= 2.2) set(hx, ry + dy, hz + dz, PAL.GOLD);       // ring
+        }
+    }
+  }
+
+  // 10 stand towers in rotating house colours with pyramid caps + bleachers
+  const houses = [PAL.RED, PAL.GREENH, PAL.BLUEH, PAL.YELL];
+  for (let i = 0; i < 10; i++) {
+    const th = (i / 10) * TAU + 0.31;
+    const col = houses[i % 4];
+    const c = Math.cos(th), sn = Math.sin(th);
+    // stepped bleachers rising away from the pitch
+    for (let k = 0; k < 3; k++) {
+      const ra = a + 3 + k * 2, rb = b + 3 + k * 2;
+      for (let w = -2; w <= 2; w++) {
+        const aa = th + w * 0.06;
+        const px = Math.round(QX + Math.cos(aa) * ra);
+        const pz = Math.round(QZ + Math.sin(aa) * rb);
+        if (px < 1 || px >= W - 1 || pz < 1 || pz >= D - 1) continue;
+        const g = surf(px, pz);
+        if (g < 0) continue;
+        for (let y = g + 1; y <= g + 1 + k; y++) set(px, y, pz, col);
+      }
+    }
+    // stand tower
+    const tx = Math.round(QX + c * (a + 10)), tz = Math.round(QZ + sn * (b + 8));
+    if (tx < 1 || tx >= W - 1 || tz < 1 || tz >= D - 1) continue;
+    const gy = surf(tx, tz);
+    if (gy < 0) continue;
+    for (let y = gy + 1; y <= gy + 8; y++)
+      for (let dx = -1; dx <= 1; dx++)
+        for (let dz = -1; dz <= 1; dz++)
+          if (Math.abs(dx) + Math.abs(dz) < 2 || y <= gy + 3) set(tx + dx, y, tz + dz, col);
+    // pyramid cap
+    for (let dx = -1; dx <= 1; dx++)
+      for (let dz = -1; dz <= 1; dz++)
+        set(tx + dx, gy + 9, tz + dz, PAL.STONE3);
+    set(tx, gy + 10, tz, PAL.GOLD);
+  }
+}
+
+/* ---------------- Hagrid's hut ---------------- */
+function buildHagridHut() {
+  const hx = 50, hz = 190;
+  const s = surf(hx, hz);
+  if (s < 0) return;
+  const y0 = s + 1;
+
+  // masonry plinth: the ground is lumpy here — drop the footprint down so the
+  // hut never floats above a lower edge column
+  for (let dz = -5; dz <= 5; dz++)
+    for (let dx = -5; dx <= 5; dx++) {
+      if (dx * dx + dz * dz > 21) continue;
+      dropFill(hx + dx, hz + dz, y0 - 1, PAL.STONE, 14);
+    }
+
+  // round stone hut r4 h5 with a stepped thatch cone
+  for (let y = y0; y <= y0 + 4; y++)
+    for (let dz = -4; dz <= 4; dz++)
+      for (let dx = -4; dx <= 4; dx++) {
+        const d = dx * dx + dz * dz;
+        if (d > 16) continue;
+        if (d <= 4 && y <= y0 + 4 && !(dx === 0 && dz === 0 && y < y0 + 4)) continue;
+        set(hx + dx, y, hz + dz, d > 9 ? PAL.PALEST : PAL.STONE);
+      }
+  // doorway (south face)
+  set(hx, y0, hz + 4, 0); set(hx, y0 + 1, hz + 4, 0);
+  set(hx + 1, y0, hz + 4, 0); set(hx + 1, y0 + 1, hz + 4, 0);
+  // lit windows
+  set(hx + 4, y0 + 2, hz, PAL.WIN); set(hx - 4, y0 + 2, hz, PAL.WIN);
+  set(hx, y0 + 2, hz - 4, PAL.WIN);
+  // thatch cone
+  for (let k = 0; k <= 5; k++) {
+    const rr = 4.6 * (1 - k / 6);
+    for (let dz = Math.ceil(-rr); dz <= rr; dz++)
+      for (let dx = Math.ceil(-rr); dx <= rr; dx++)
+        if (dx * dx + dz * dz <= rr * rr + 0.4)
+          set(hx + dx, y0 + 5 + k, hz + dz, hash(hx + dx, k, hz + dz) < 0.3 ? PAL.PATH : PAL.WOOD2);
+  }
+  // chimney
+  box(hx + 3, y0 + 5, hz - 2, hx + 3, y0 + 10, hz - 2, PAL.ROCK2);   // starts inside the thatch
+  set(hx + 3, y0 + 11, hz - 2, PAL.BLACK);
+
+  // pumpkin patch (3×3), fence and a lamp
+  for (let dz = 6; dz <= 10; dz++)
+    for (let dx = -2; dx <= 2; dx++) {
+      const x = hx + dx, z = hz + dz;
+      const g = surf(x, z);
+      if (g < 0) continue;
+      set(x, g, z, PAL.DIRT);
+      if (hash(x, 2, z) < 0.34) set(x, g + 1, z, PAL.PUMPK);
+    }
+  for (let dx = -3; dx <= 3; dx++) {                          // fence
+    for (const dz of [5, 11]) {
+      const x = hx + dx, z = hz + dz;
+      const g = surf(x, z);
+      if (g < 0) continue;
+      if (Math.abs(dx) % 2 === 0) { set(x, g + 1, z, PAL.WOOD); set(x, g + 2, z, PAL.WOOD); }
+      set(x, g + 2, z, PAL.WOOD2);
+    }
+  }
+  lampPost(hx - 6, surf(hx - 6, hz + 4) + 1, hz + 4);
+  LIGHTS.push({ x: hx, y: y0 + 6, z: hz, s: 1.1 });
+}
+
+/* ---------------- Stone circle ---------------- */
+function buildStoneCircle() {
+  const cx = 30, cz = 160;
+  const s = surf(cx, cz);
+  if (s < 0) return;
+  for (let i = 0; i < 11; i++) {
+    const a = (i / 11) * TAU;
+    const x = Math.round(cx + Math.cos(a) * 6), z = Math.round(cz + Math.sin(a) * 6);
+    const g = surf(x, z);
+    if (g < 0) continue;
+    const hh = 3 + (i % 3);
+    for (let y = g + 1; y <= g + hh; y++) set(x, y, z, PAL.PALEST);
+    if (i % 2 === 0) set(x + 1, g + 1, z, PAL.PALEST);
+  }
+}
+
+/* ---------------- Whomping Willow ---------------- */
+function buildWillow() {
+  const wx = 72, wz = 150;
+  const s = surf(wx, wz);
+  if (s < 0) return;
+  for (let y = s + 1; y <= s + 6; y++)                        // 2×2 trunk
+    for (let dx = 0; dx <= 1; dx++)
+      for (let dz = 0; dz <= 1; dz++)
+        set(wx + dx, y, wz + dz, PAL.TRUNK);
+  for (let i = 0; i < 9; i++) {                               // arcing branches
+    const a = (i / 9) * TAU + rnd() * 0.4;
+    const c = Math.cos(a), sn = Math.sin(a);
+    const len = rr(6, 9);
+    for (let t = 0; t <= 1.001; t += 1 / 14) {
+      const px = Math.round(wx + c * (1 + t * len));
+      const pz = Math.round(wz + sn * (1 + t * len));
+      const py = Math.round(s + 7 + Math.sin(Math.PI * t) * 4 - t * t * 3);
+      set(px, py, pz, PAL.TRUNK);
+      if (t > 0.55 && hash(px, py, pz) < 0.75) {              // drooping leaves
+        const lm = hash(px, 3, pz) < 0.5 ? PAL.LEAF : PAL.LEAF2;
+        set(px, py - 1, pz, lm);
+        if (hash(px, 4, pz) < 0.6) set(px, py - 2, pz, PAL.LEAF3);
+        set(px, py + 1, pz, lm);
+      }
+    }
+  }
+  set(wx, s + 7, wz, PAL.LEAF); set(wx + 1, s + 8, wz + 1, PAL.LEAF2);
+}
+
+/* ---------------- Paths ---------------- */
+function groundPath(x0, z0, x1, z1, w = 2) {
+  const dx = x1 - x0, dz = z1 - z0;
+  const ll = Math.sqrt(dx * dx + dz * dz) || 1;
+  const nx = -dz / ll, nz = dx / ll;
+  line2(x0, z0, x1, z1, (x, z) => {
+    for (let j = 0; j < w; j++) {
+      const off = j - (w - 1) / 2;
+      const px = Math.round(x + nx * off), pz = Math.round(z + nz * off);
+      const g = surf(px, pz);
+      if (g > 0 && g >= LAKE_Y && solid(px, g + 1, pz) === false)
+        set(px, g, pz, PAL.GRAVEL);
+    }
+  });
+}
+function buildPaths() {
+  groundPath(95, 175, 30, 162, 2);      // wooden bridge → stone circle
+  groundPath(42, 170, 50, 186, 2);      // circle → Hagrid's hut
+  groundPath(50, 196, 66, 216, 2);      // hut → the lake
+}
+
+/* ---------------- Forbidden Forest ---------------- */
+function buildForest() {
+  const occ = new Uint8Array(W * D);
+  const clear = (x, z) => {
+    const dxq = x - QX, dzq = z - QZ;
+    if ((dxq * dxq) / (28 * 28) + (dzq * dzq) / (17 * 17) <= 1) return true;   // pitch
+    if ((x - 50) * (x - 50) + (z - 190) * (z - 190) < 144) return true;        // hut
+    if ((x - 30) * (x - 30) + (z - 160) * (z - 160) < 100) return true;         // circle
+    if ((x - 72) * (x - 72) + (z - 150) * (z - 150) < 81) return true;          // willow
+    if (x >= 230 && x <= 254 && z >= 58 && z <= 138) return true;               // station
+    const g = surf(x, z);
+    if (g < LAKE_Y + 1) return true;                                            // water
+    if (g >= PLAT_Y - 8) return true;                                           // castle plateau
+    if (g > 0 && solid(x, g + 1, z)) return true;                               // walls etc.
+    return false;
+  };
+  const plant = (x, z, sp) => {
+    for (let dz = -sp; dz <= sp; dz++)
+      for (let dx = -sp; dx <= sp; dx++) {
+        const nx = x + dx, nz = z + dz;
+        if (nx >= 0 && nx < W && nz >= 0 && nz < D) occ[nx + W * nz] = 1;
+      }
+  };
+  const free = (x, z, sp) => {
+    for (let dz = -sp; dz <= sp; dz++)
+      for (let dx = -sp; dx <= sp; dx++) {
+        const nx = x + dx, nz = z + dz;
+        if (nx < 0 || nx >= W || nz < 0 || nz >= D) continue;
+        if (occ[nx + W * nz]) return false;
+      }
+    return true;
+  };
+
+  let placed = 0;
+  for (let i = 0; i < 9000; i++) {
+    const a = rnd() * TAU, rr2 = Math.sqrt(rnd()) * (R - 4);
+    const x = Math.round(CX + Math.cos(a) * rr2);
+    const z = Math.round(CZ + Math.sin(a) * rr2);
+    if (x < 2 || x >= W - 2 || z < 2 || z >= D - 2) continue;
+    if (clear(x, z)) continue;
+    const g = surf(x, z);
+    const nx = (x - CX) / R, nz = (z - CZ) / R;
+    const forestZone = nx < -0.2 || (nx < 0.15 && nz < -0.5) || (nx < 0.15 && nz > 0.5);
+    let sp = 0, dense = false;
+    if (forestZone && fbm(x * 0.03, z * 0.03) > 0.33 && rnd() < 0.9) {
+      sp = 3; dense = true;
+    } else if (g < GROUNDS_Y) {
+      if (rnd() >= 0.06) continue;
+      sp = 4;
+    } else {
+      if (rnd() >= 0.015) continue;
+      sp = 4;
+    }
+    if (!free(x, z, sp)) continue;
+    tree(x, z, g, dense ? rnd() < 0.55 : rnd() < 0.3);
+    plant(x, z, sp);
+    placed++;
+  }
+}
+
+function tree(x, z, g, pine) {
+  if (g < 0) return;
+  if (pine) {
+    const th = ri(5, 9);
+    for (let y = g + 1; y <= g + th; y++) set(x, y, z, PAL.TRUNK);
+    const coneH = ri(6, 10), r0 = rr(2.2, 3.2);
+    const mats = [PAL.LEAF3, PAL.LEAF, PAL.LEAF2];
+    for (let k = 1; k <= coneH; k++) {
+      const rr2 = r0 * (1 - k / coneH) + 0.4;
+      if (rr2 < 0.4) break;
+      const m = mats[k % 3];
+      for (let dz = Math.ceil(-rr2); dz <= rr2; dz++)
+        for (let dx = Math.ceil(-rr2); dx <= rr2; dx++) {
+          const d = dx * dx + dz * dz;
+          if (d > rr2 * rr2 + 0.3) continue;
+          if (hash(x + dx, k, z + dz) < 0.12) continue;       // ragged edges
+          set(x + dx, g + th + k, z + dz, m);
+        }
+    }
+  } else {
+    const th = ri(3, 5);
+    for (let y = g + 1; y <= g + th; y++) set(x, y, z, PAL.TRUNK);
+    const cr = rr(2.4, 3.4);
+    for (let dy = -1; dy <= Math.ceil(cr); dy++)
+      for (let dz = Math.ceil(-cr); dz <= cr; dz++)
+        for (let dx = Math.ceil(-cr); dx <= cr; dx++) {
+          const d = (dx * dx + dz * dz) / (cr * cr) + (dy * dy) / (cr * cr * 0.8);
+          if (d > 1.05) continue;
+          if (hash(x + dx, dy + 3, z + dz) < 0.2) continue;    // noisy crown
+          const m = hash(x + dx, dy + 7, z + dz) < 0.5 ? PAL.LEAF2 : PAL.LEAF;
+          set(x + dx, g + th + dy, z + dz, m);
+        }
+  }
+}
+
+/* ---------------- Cliff bushes ---------------- */
+function buildCliffBushes() {
+  for (let z = 1; z < D - 1; z++)
+    for (let x = 1; x < W - 1; x++) {
+      const g = surf(x, z);
+      if (g < LAKE_Y + 1) continue;
+      if (g >= PLAT_Y - 8) continue;                            // not on the castle plateau
+      const m = get(x, g, z);
+      if (solid(x, g + 1, z)) continue;
+      const rock = m === PAL.ROCK || m === PAL.ROCK2 || m === PAL.ROCK3 || m === PAL.MOSS;
+      const grass = m === PAL.GRASS || m === PAL.GRASS2;
+      const steepN = get(x + 1, g, z) < g - 2 || get(x - 1, g, z) < g - 2 ||
+                     get(x, g, z + 1) < g - 2 || get(x, g, z - 1) < g - 2;
+      let p = 0;
+      if (rock && steepN) p = 0.11;
+      else if (grass && g > BASE_Y && g <= GROUNDS_Y) p = 0.03;
+      if (p === 0 || hash(x, 23, z) >= p) continue;
+      for (let dz = -1; dz <= 1; dz++)
+        for (let dx = -1; dx <= 1; dx++) {
+          if (hash(x + dx, 29, z + dz) < 0.2) continue;
+          const lm = hash(x + dx, 31, z + dz) < 0.5 ? PAL.LEAF : PAL.LEAF2;
+          set(x + dx, g + 1, z + dz, lm);
+          if (hash(x + dx, 37, z + dz) < 0.55) set(x + dx, g + 2, z + dz, PAL.LEAF3);
+        }
+    }
+}
+
+/* ---------------- Boats with candles ---------------- */
+function buildBoats() {
+  const spots = [];
+  for (let r2 = 0; r2 < 2; r2++)
+    for (let c = 0; c < 4; c++)
+      spots.push([170 + c * 9, 239 + r2 * 5]);
+  for (const sp of spots) {
+    const bx = sp[0], bz = sp[1];
+    if (bx < 2 || bx >= W - 3 || bz < 2 || bz >= D - 3) continue;
+    if (get(bx, LAKE_Y, bz) !== PAL.WATER) continue;
+    // 5×3 hull
+    for (let dz = -2; dz <= 2; dz++)
+      for (let dx = -1; dx <= 1; dx++) {
+        const edge = Math.abs(dz) === 2 || Math.abs(dx) === 1;
+        set(bx + dx, LAKE_Y, bz + dz, PAL.WOOD);
+        if (edge) set(bx + dx, LAKE_Y + 1, bz + dz, PAL.WOOD);   // rim
+        if (!edge) set(bx + dx, LAKE_Y - 1, bz + dz, PAL.WOOD);  // deck one lower
+      }
+    set(bx, LAKE_Y + 1, bz, PAL.WOOD);                           // candle post
+    set(bx, LAKE_Y + 2, bz, PAL.CANDLE);
+  }
+}
+
+/* ---------------- Giant squid ---------------- */
+function buildSquid() {
+  const bases = [[142, 213], [149, 216], [145, 221], [152, 212]];
+  for (let i = 0; i < 4; i++) {
+    const b = bases[i];
+    const dir = (i / 4) * TAU + 0.8;
+    const c = Math.cos(dir), sn = Math.sin(dir);
+    for (let t = 0; t <= 1.001; t += 1 / 18) {
+      const px = Math.round(b[0] + c * t * 7);
+      const pz = Math.round(b[1] + sn * t * 7);
+      const py = Math.round(LAKE_Y - 2 + Math.sin(Math.PI * t) * 6.5);
+      const th = 1.7 * (1 - t * 0.75);
+      for (let dy = Math.ceil(-th); dy <= th; dy++)
+        for (let dz = Math.ceil(-th); dz <= th; dz++)
+          for (let dx = Math.ceil(-th); dx <= th; dx++)
+            if (dx * dx + dy * dy + dz * dz <= th * th + 0.4)
+              set(px + dx, py + dy, pz + dz, PAL.SQUID);
+    }
+  }
+}
+
+/* ---------------- Hogsmeade station & the Hogwarts Express ---------------- */
+function buildStation() {
+  // track grade = highest ground along the corridor
+  let grade = 0;
+  for (let z = 66; z <= 132; z++)
+    for (let x = 233; x <= 239; x++) grade = Math.max(grade, surf(x, z));
+  if (grade <= 0) return;
+
+  // gravel bed, sleepers, iron rails
+  for (let z = 66; z <= 132; z++) {
+    for (let x = 233; x <= 239; x++) {
+      const g = surf(x, z);
+      for (let y = Math.max(0, g); y <= grade; y++) set(x, y, z, PAL.GRAVEL);
+      if (z % 3 === 0) set(x, grade + 1, z, PAL.WOOD2);
+    }
+    set(235, grade + 2, z, PAL.IRON);
+    set(237, grade + 2, z, PAL.IRON);
+  }
+
+  // platform with lamps
+  for (let z = 70; z <= 128; z++)
+    for (let x = 240; x <= 243; x++) {
+      const g = surf(x, z);
+      for (let y = Math.max(0, g); y <= grade + 3; y++) set(x, y, z, PAL.STONE3);
+    }
+  for (const z of [74, 88, 102, 116, 126]) lampPost(241, grade + 4, z);
+
+  // wooden station house
+  {
+    const hx = 249, hz = 102;
+    const y0 = surf(hx, hz) + 1;
+    hall({
+      cx: hx, cz: hz, hl: 5, hw: 9, h: 7, y0,
+      roof: 'gable', roofH: 5, ev: 3, litP: 0.9,
+      stone: PAL.WOOD, trim: PAL.WOOD2, roofMat: PAL.ROOF
+    });
+  }
+
+  // ---- the Hogwarts Express ----
+  const gy = grade;
+  // boiler + red skirt
+  box(235, gy + 4, 78, 237, gy + 6, 88, PAL.BLACK);
+  box(235, gy + 2, 78, 237, gy + 3, 94, PAL.TRAINR);
+  // chimney with a flare, headlamp
+  box(236, gy + 7, 79, 236, gy + 9, 81, PAL.BLACK);
+  box(235, gy + 10, 79, 237, gy + 10, 81, PAL.BLACK);
+  set(236, gy + 6, 77, PAL.CANDLE);
+  // cab with lit windows + black roof
+  box(235, gy + 4, 89, 237, gy + 9, 94, PAL.TRAINR);
+  for (let z = 90; z <= 93; z++) { set(235, gy + 7, z, PAL.WIN); set(237, gy + 7, z, PAL.WIN); }
+  box(234, gy + 10, 88, 238, gy + 10, 95, PAL.BLACK);
+  // tender
+  box(235, gy + 2, 95, 237, gy + 8, 101, PAL.BLACK);
+  box(234, gy + 9, 95, 238, gy + 9, 101, PAL.ROCK2);
+  // three carriages with lit windows and black roofs
+  for (let c = 0; c < 3; c++) {
+    const z0 = 103 + c * 10, z1 = z0 + 8;
+    box(235, gy + 2, z0, 237, gy + 8, z1, PAL.TRAINR);
+    for (let z = z0 + 1; z <= z1 - 1; z++) {
+      if (hash(235, z, c) < 0.85) { set(235, gy + 6, z, PAL.WIN); set(237, gy + 6, z, PAL.WIN); }
+      if (hash(235, z, c + 9) < 0.85) { set(235, gy + 7, z, PAL.WIN); set(237, gy + 7, z, PAL.WIN); }
+    }
+    box(234, gy + 9, z0 - 1, 238, gy + 9, z1 + 1, PAL.BLACK);
+    for (let z = z0 + 1; z <= z1 - 1; z += 3) {
+      set(234, gy + 2, z, PAL.BLACK); set(238, gy + 2, z, PAL.BLACK);
+      set(234, gy + 1, z, PAL.BLACK); set(238, gy + 1, z, PAL.BLACK);
+    }
+  }
+}/* ============================================================
+   06_mesher.js — voxel → triangle mesher (PROJECT.md §10)
+   48³ chunks · face culling · voxel ambient occlusion ·
+   colour grain · compact Int16/Int8/Uint16/Uint32 buffers
+   ============================================================ */
+
+const CHUNK = 48;
+const NXc = Math.ceil(W / CHUNK), NYc = Math.ceil(H / CHUNK), NZc = Math.ceil(D / CHUNK);
+
+// face table: normal n, axes u/v with u × v = n; o = face-plane origin corner
+const FACES = [
+  { n: [1, 0, 0],  u: [0, 1, 0], v: [0, 0, 1], o: [1, 0, 0] },
+  { n: [-1, 0, 0], u: [0, 0, 1], v: [0, 1, 0], o: [0, 0, 0] },
+  { n: [0, 1, 0],  u: [0, 0, 1], v: [1, 0, 0], o: [0, 1, 0] },
+  { n: [0, -1, 0], u: [1, 0, 0], v: [0, 0, 1], o: [0, 0, 0] },
+  { n: [0, 0, 1],  u: [1, 0, 0], v: [0, 1, 0], o: [0, 0, 1] },
+  { n: [0, 0, -1], u: [0, 1, 0], v: [1, 0, 0], o: [0, 0, 0] }
+];
+const AO_LUT = [0.42, 0.62, 0.80, 1.0];
+
+function faceVisible(kind, nid) {
+  if (nid === 0) return true;
+  const nk = M_KIND[nid];
+  if (kind <= 2) return nk >= 3;          // opaque vs air/water/glass
+  if (kind === 3) return nk === 0 || nk === 4;   // water vs air/glass
+  return nk === 0 || nk === 3;                  // glass vs air/water
+}
+
+// growable per-kind buffers (reset between chunks)
+function makeBuf() {
+  return {
+    p: new Int16Array(12288 * 3), n: new Int8Array(12288 * 3),
+    c: new Uint16Array(12288 * 3), i: new Uint32Array(18432 * 3),
+    vn: 0, in: 0,
+    reset() { this.vn = 0; this.in = 0; },
+    growV() {
+      const p = new Int16Array(this.p.length * 2); p.set(this.p); this.p = p;
+      const n = new Int8Array(this.n.length * 2); n.set(this.n); this.n = n;
+      const c = new Uint16Array(this.c.length * 2); c.set(this.c); this.c = c;
+    },
+    growI() {
+      const i = new Uint32Array(this.i.length * 2); i.set(this.i); this.i = i;
+    },
+    vert(x, y, z, nx, ny, nz, r, g, b) {
+      if ((this.vn + 1) * 3 > this.p.length) this.growV();
+      const v3 = this.vn * 3;
+      this.p[v3] = x; this.p[v3 + 1] = y; this.p[v3 + 2] = z;
+      this.n[v3] = nx; this.n[v3 + 1] = ny; this.n[v3 + 2] = nz;
+      this.c[v3] = r; this.c[v3 + 1] = g; this.c[v3 + 2] = b;
+      this.vn++;
+    },
+    tri(a, b, c) {
+      if (this.in + 3 > this.i.length) this.growI();
+      this.i[this.in] = a; this.i[this.in + 1] = b; this.i[this.in + 2] = c;
+      this.in += 3;
+    }
+  };
+}
+const BUFS = [makeBuf(), makeBuf(), makeBuf(), makeBuf()];
+
+function geomFrom(b) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(b.p.slice(0, b.vn * 3), 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(b.n.slice(0, b.vn * 3), 3, true));
+  g.setAttribute('color', new THREE.BufferAttribute(b.c.slice(0, b.vn * 3), 3, true));
+  g.setIndex(new THREE.BufferAttribute(b.i.slice(0, b.in), 1));
+  g.computeBoundingSphere();
+  return g;
+}
+
+// meshes every chunk into `group` (materials: solid, emissive, water, glass)
+async function addChunkMeshes(group, mats, onProgress) {
+  let totalTris = 0, meshes = 0;
+  let chunkNo = 0;
+  const nChunks = NXc * NYc * NZc;
+
+  for (let cy = 0; cy < NYc; cy++)
+    for (let cz = 0; cz < NZc; cz++)
+      for (let cx = 0; cx < NXc; cx++) {
+        const x0 = cx * CHUNK, x1 = Math.min(W, x0 + CHUNK);
+        const y0 = cy * CHUNK, y1 = Math.min(H, y0 + CHUNK);
+        const z0 = cz * CHUNK, z1 = Math.min(D, z0 + CHUNK);
+        for (const b of BUFS) b.reset();
+
+        for (let y = y0; y < y1; y++) {
+          const yOff = D * y;
+          for (let z = z0; z < z1; z++) {
+            const row = W * (z + yOff);
+            for (let x = x0; x < x1; x++) {
+              const m = grid[x + row];
+              if (m === 0) continue;
+              const kind = M_KIND[m];
+              if (kind === 0) continue;
+              const bi = kind === 1 ? 0 : kind === 2 ? 1 : kind === 3 ? 2 : 3;
+              const b = BUFS[bi];
+              const grain = 1 + (hash(x, y, z) - 0.5) * 2 * M_VARY[m];
+              const br = M_R[m] * grain, bg = M_G[m] * grain, bb = M_B[m] * grain;
+              const opaque = kind <= 2;
+
+              for (let f = 0; f < 6; f++) {
+                const F = FACES[f];
+                const nx2 = x + F.n[0], ny2 = y + F.n[1], nz2 = z + F.n[2];
+                let nid;
+                if (nx2 < 0 || nx2 >= W || ny2 < 0 || ny2 >= H || nz2 < 0 || nz2 >= D) nid = 0;
+                else nid = grid[nx2 + W * (nz2 + D * ny2)];
+                if (!faceVisible(kind, nid)) continue;
+
+                // voxel AO on the 4 corners (opaque only)
+                let a0 = 3, a1 = 3, a2 = 3, a3 = 3;
+                if (opaque) {
+                  const ux = F.u[0], uy = F.u[1], uz = F.u[2];
+                  const vx = F.v[0], vy = F.v[1], vz = F.v[2];
+                  let s1, s2, cc;
+                  s1 = M_OPAQUE[get(nx2 - ux, ny2 - uy, nz2 - uz)];
+                  s2 = M_OPAQUE[get(nx2 - vx, ny2 - vy, nz2 - vz)];
+                  cc = M_OPAQUE[get(nx2 - ux - vx, ny2 - uy - vy, nz2 - uz - vz)];
+                  a0 = (s1 && s2) ? 0 : 3 - (s1 + s2 + cc);
+                  s1 = M_OPAQUE[get(nx2 + ux, ny2 + uy, nz2 + uz)];
+                  cc = M_OPAQUE[get(nx2 + ux - vx, ny2 + uy - vy, nz2 + uz - vz)];
+                  a1 = (s1 && s2) ? 0 : 3 - (s1 + s2 + cc);
+                  s2 = M_OPAQUE[get(nx2 + vx, ny2 + vy, nz2 + vz)];
+                  cc = M_OPAQUE[get(nx2 + ux + vx, ny2 + uy + vy, nz2 + uz + vz)];
+                  a2 = (s1 && s2) ? 0 : 3 - (s1 + s2 + cc);
+                  s1 = M_OPAQUE[get(nx2 - ux, ny2 - uy, nz2 - uz)];
+                  cc = M_OPAQUE[get(nx2 - ux + vx, ny2 - uy + vy, nz2 - uz + vz)];
+                  a3 = (s1 && s2) ? 0 : 3 - (s1 + s2 + cc);
+                  if (kind === 2) {                            // emissive: clamp ≥ level 2
+                    if (a0 < 2) a0 = 2; if (a1 < 2) a1 = 2;
+                    if (a2 < 2) a2 = 2; if (a3 < 2) a3 = 2;
+                  }
+                }
+                const l0 = AO_LUT[a0], l1 = AO_LUT[a1], l2 = AO_LUT[a2], l3 = AO_LUT[a3];
+
+                const x0v = x + F.o[0], y0v = y + F.o[1], z0v = z + F.o[2];
+                const ux2 = F.u[0], uy2 = F.u[1], uz2 = F.u[2];
+                const vx2 = F.v[0], vy2 = F.v[1], vz2 = F.v[2];
+                const n8x = F.n[0] * 127, n8y = F.n[1] * 127, n8z = F.n[2] * 127;
+                const vBase = b.vn;
+                let cr = br * l0; let cg = bg * l0; let cb = bb * l0;
+                b.vert(x0v, y0v, z0v, n8x, n8y, n8z,
+                  cr > 1 ? 65535 : (cr * 65535) | 0, cg > 1 ? 65535 : (cg * 65535) | 0, cb > 1 ? 65535 : (cb * 65535) | 0);
+                cr = br * l1; cg = bg * l1; cb = bb * l1;
+                b.vert(x0v + ux2, y0v + uy2, z0v + uz2, n8x, n8y, n8z,
+                  cr > 1 ? 65535 : (cr * 65535) | 0, cg > 1 ? 65535 : (cg * 65535) | 0, cb > 1 ? 65535 : (cb * 65535) | 0);
+                cr = br * l2; cg = bg * l2; cb = bb * l2;
+                b.vert(x0v + ux2 + vx2, y0v + uy2 + vy2, z0v + uz2 + vz2, n8x, n8y, n8z,
+                  cr > 1 ? 65535 : (cr * 65535) | 0, cg > 1 ? 65535 : (cg * 65535) | 0, cb > 1 ? 65535 : (cb * 65535) | 0);
+                cr = br * l3; cg = bg * l3; cb = bb * l3;
+                b.vert(x0v + vx2, y0v + vy2, z0v + vz2, n8x, n8y, n8z,
+                  cr > 1 ? 65535 : (cr * 65535) | 0, cg > 1 ? 65535 : (cg * 65535) | 0, cb > 1 ? 65535 : (cb * 65535) | 0);
+                if (a0 + a2 < a1 + a3) {                      // flip diagonal
+                  b.tri(vBase + 1, vBase + 2, vBase + 3);
+                  b.tri(vBase + 1, vBase + 3, vBase);
+                } else {
+                  b.tri(vBase, vBase + 1, vBase + 2);
+                  b.tri(vBase, vBase + 2, vBase + 3);
+                }
+              }
+            }
+          }
+        }
+
+        for (let k = 0; k < 4; k++) {
+          const b = BUFS[k];
+          if (b.vn === 0) continue;
+          const mesh = new THREE.Mesh(geomFrom(b), mats[k]);
+          if (k <= 1) { mesh.castShadow = true; mesh.receiveShadow = true; }
+          else if (k === 2) mesh.receiveShadow = true;
+          group.add(mesh);
+          meshes++;
+          totalTris += b.in / 3;
+        }
+        chunkNo++;
+        if (onProgress && (chunkNo & 7) === 0) {
+          onProgress(chunkNo / nChunks);
+          await new Promise(r => setTimeout(r, 0));            // yield so the loader updates
+        }
+      }
+  if (onProgress) onProgress(1);
+  return { tris: totalTris, meshes };
+}/* ============================================================
+   07_scene.js — renderer, sky, lights, materials, clouds,
+   stars, moon, flying car, bloom  (PROJECT.md §11)
+   ============================================================ */
+
+let renderer, scene, camPersp, camOrtho, composer, renderPass;
+let voxelGroup;
+const cloudGroup = new THREE.Group();
+const cloudList = [];
+let moonMesh, stars;
+const pointLights = [];
+
+// ---- materials (kind 1..4) ----
+const MAT_SOLID = new THREE.MeshLambertMaterial({ vertexColors: true });
+const MAT_EMISSIVE = new THREE.MeshBasicMaterial({
+  vertexColors: true, color: new THREE.Color(1.9, 1.9, 1.9)
+});
+const MAT_WATER = new THREE.MeshPhongMaterial({
+  vertexColors: true, color: 0xffffff, opacity: 0.8, transparent: true,
+  shininess: 90, specular: new THREE.Color(0x5c74b8), depthWrite: false
+});
+const MAT_GLASS = new THREE.MeshPhongMaterial({
+  vertexColors: true, opacity: 0.5, transparent: true, shininess: 60,
+  specular: new THREE.Color(0x9fd8c8), emissive: new THREE.Color(0x16352c),
+  depthWrite: false
+});
+
+// ---- moon direction: 8° above horizon, 45° left of the default view ----
+const MOON_EL = 8 * DEG;
+const MOON_AZ = 0.62 + Math.PI + Math.PI / 4;
+const MOON_SKY = new THREE.Vector3(
+  Math.sin(MOON_AZ) * Math.cos(MOON_EL),
+  Math.sin(MOON_EL),
+  Math.cos(MOON_AZ) * Math.cos(MOON_EL)
+);
+let moonLight;
+
+function initScene() {
+  renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.15;
+  document.body.appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  // vertical night gradient sky
+  const bg = document.createElement('canvas');
+  bg.width = 2; bg.height = 256;
+  const bctx = bg.getContext('2d');
+  const grad = bctx.createLinearGradient(0, 0, 0, 256);
+  grad.addColorStop(0.0, '#050817');
+  grad.addColorStop(0.38, '#0b1336');
+  grad.addColorStop(0.72, '#15215a');
+  grad.addColorStop(1.0, '#1c2a6a');
+  bctx.fillStyle = grad;
+  bctx.fillRect(0, 0, 2, 256);
+  const bgTex = new THREE.CanvasTexture(bg);
+  bgTex.colorSpace = THREE.SRGBColorSpace;
+  scene.background = bgTex;
+
+  camPersp = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 4000);
+  camOrtho = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 4000);
+
+  // ---- lights ----
+  scene.add(new THREE.HemisphereLight(0x5a6cc0, 0x1a1522, 1.1));
+  scene.add(new THREE.AmbientLight(0x202848, 0.9));
+
+  moonLight = new THREE.DirectionalLight(0xb4c4ff, 2.6);
+  const ldir = new THREE.Vector3(MOON_SKY.x * 0.6, 1, MOON_SKY.z * 0.6).normalize();
+  moonLight.position.set(CX + ldir.x * 450, 80 + ldir.y * 450, CZ + ldir.z * 450);
+  moonLight.target.position.set(CX, 80, CZ);
+  scene.add(moonLight);
+  scene.add(moonLight.target);
+  moonLight.castShadow = true;
+  moonLight.shadow.mapSize.set(4096, 4096);
+  moonLight.shadow.camera.left = -200;
+  moonLight.shadow.camera.right = 200;
+  moonLight.shadow.camera.top = 200;
+  moonLight.shadow.camera.bottom = -200;
+  moonLight.shadow.camera.near = 1;
+  moonLight.shadow.camera.far = 1000;
+  moonLight.shadow.bias = -0.0004;
+  moonLight.shadow.normalBias = 0.35;
+  moonLight.shadow.radius = 3;
+
+  voxelGroup = new THREE.Group();
+  scene.add(voxelGroup);
+  cloudGroup.position.set(CX, 0, CZ);                    // pivot at the island centre
+  scene.add(cloudGroup);
+
+  buildStars();
+  buildMoon();
+  initCar();
+  initComposer();
+}
+
+function initComposer() {
+  composer = new EffectComposer(renderer);
+  renderPass = new RenderPass(scene, camPersp);
+  composer.addPass(renderPass);
+  composer.addPass(new UnrealBloomPass(
+    new THREE.Vector2(window.innerWidth, window.innerHeight), 0.7, 0.35, 0.85));
+  composer.addPass(new OutputPass());
+}
+
+/* ---------------- stars ---------------- */
+function buildStars() {
+  const N = 2200, R0 = 1800;
+  const pos = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const a = rnd() * TAU;
+    const v = rnd() * 2 - 1;
+    const s = Math.sqrt(1 - v * v);
+    const y = Math.abs(v) * 0.9 + 0.1;                    // dome bias
+    pos[i * 3] = Math.cos(a) * s * R0;
+    pos[i * 3 + 1] = y * R0;
+    pos[i * 3 + 2] = Math.sin(a) * s * R0;
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  stars = new THREE.Points(g, new THREE.PointsMaterial({
+    color: 0xcdd8ff, size: 1.6, sizeAttenuation: false, depthWrite: false
+  }));
+  scene.add(stars);
+}
+
+/* ---------------- voxel moon ---------------- */
+function buildMoon() {
+  const CELL = 3, RN = 6;
+  const pos = [], nor = [], idx = [];
+  const boxFaces = [
+    [[1, 0, 0], [[1, -1, -1], [1, 1, -1], [1, 1, 1], [1, -1, 1]]],
+    [[-1, 0, 0], [[-1, -1, 1], [-1, 1, 1], [-1, 1, -1], [-1, -1, -1]]],
+    [[0, 1, 0], [[-1, 1, 1], [1, 1, 1], [1, 1, -1], [-1, 1, -1]]],
+    [[0, -1, 0], [[-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1]]],
+    [[0, 0, 1], [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]]],
+    [[0, 0, -1], [[1, -1, -1], [-1, -1, -1], [-1, 1, -1], [1, 1, -1]]]
+  ];
+  const inside = (x, y, z) =>
+    x >= -RN && x <= RN && y >= -RN && y <= RN && z >= -RN && z <= RN &&
+    x * x + y * y + z * z <= RN * RN + RN;
+  for (let y = -RN; y <= RN; y++)
+    for (let z = -RN; z <= RN; z++)
+      for (let x = -RN; x <= RN; x++) {
+        if (!inside(x, y, z)) continue;
+        const fs = [];
+        if (!inside(x + 1, y, z)) fs.push(boxFaces[0]);
+        if (!inside(x - 1, y, z)) fs.push(boxFaces[1]);
+        if (!inside(x, y + 1, z)) fs.push(boxFaces[2]);
+        if (!inside(x, y - 1, z)) fs.push(boxFaces[3]);
+        if (!inside(x, y, z + 1)) fs.push(boxFaces[4]);
+        if (!inside(x, y, z - 1)) fs.push(boxFaces[5]);
+        for (const fc of fs) {
+          const base = pos.length / 3;
+          for (const c of fc[1]) {
+            pos.push(x * CELL + c[0] * CELL / 2, y * CELL + c[1] * CELL / 2, z * CELL + c[2] * CELL / 2);
+            nor.push(fc[0][0], fc[0][1], fc[0][2]);
+          }
+          idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+        }
+      }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setIndex(idx);
+  moonMesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: new THREE.Color(2.1, 2.1, 2.0) }));
+  scene.add(moonMesh);
+}
+
+// project the moon as a point at infinity — pan/zoom leave it in place
+function updateMoon(cam, dir, target, halfH, tanV, aspect) {
+  const f = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+  const r = new THREE.Vector3(1, 0, 0).applyQuaternion(cam.quaternion);
+  const u = new THREE.Vector3(0, 1, 0).applyQuaternion(cam.quaternion);
+  const lx = MOON_SKY.dot(r), ly = MOON_SKY.dot(u), lz = -MOON_SKY.dot(dir);
+  if (lz <= 0.05) { moonMesh.visible = false; return; }
+  const ndcX = (lx / lz) / (tanV * aspect);
+  const ndcY = (ly / lz) / tanV;
+  moonMesh.visible = true;
+  moonMesh.position.copy(target)
+    .addScaledVector(dir, -1400)
+    .addScaledVector(u, ndcY * halfH)
+    .addScaledVector(r, ndcX * halfH * aspect);
+  const s = halfH / 300;
+  moonMesh.scale.set(s, s, s);
+}
+
+/* ---------------- clouds ---------------- */
+function buildClouds() {
+  const mat = new THREE.MeshLambertMaterial({
+    color: 0x8792b8, emissive: 0x10162e, transparent: true, opacity: 0.62,
+    depthWrite: false
+  });
+  const spec = [];
+  for (let i = 0; i < 26; i++) {
+    const a = rnd() * TAU;
+    const r2 = lerp(R - 12, R + 28, rnd());
+    const y = lerp(LAKE_Y - 52, LAKE_Y - 12, rnd());
+    spec.push({ x: CX + Math.cos(a) * r2, y, z: CZ + Math.sin(a) * r2, n: ri(3, 7), sc: 1 });
+  }
+  for (let i = 0; i < 4; i++) {
+    const a = rnd() * TAU, r2 = rr(420, 720);
+    spec.push({ x: CX + Math.cos(a) * r2, y: rr(140, 320), z: CZ + Math.sin(a) * r2, n: ri(4, 7), sc: 2.2 });
+  }
+
+  for (const sp of spec) {
+    // union of 3–7 ellipsoids voxelized at 2-unit cells
+    const ells = [];
+    for (let e = 0; e < sp.n; e++) {
+      ells.push({
+        cx: rr(-10, 10) * sp.sc, cy: rr(-2.5, 2.5) * sp.sc, cz: rr(-7, 7) * sp.sc,
+        rx: rr(5, 10) * sp.sc, ry: rr(2.2, 4) * sp.sc, rz: rr(4, 8) * sp.sc
+      });
+    }
+    let ext = 2;
+    for (const e of ells)
+      ext = Math.max(ext, Math.ceil(Math.max(Math.abs(e.cx) + e.rx, Math.abs(e.cy) + e.ry, Math.abs(e.cz) + e.rz)) + 1);
+    const dim = ext * 2 + 1;
+    const gridC = new Uint8Array(dim * dim * dim);
+    const gi = (x, y, z) => (x + ext) + dim * ((z + ext) + dim * (y + ext));
+    for (let y = -ext; y <= ext; y++)
+      for (let z = -ext; z <= ext; z++)
+        for (let x = -ext; x <= ext; x++) {
+          for (const e of ells) {
+            const dx = (x - e.cx) / e.rx, dy = (y - e.cy) / e.ry, dz = (z - e.cz) / e.rz;
+            if (dx * dx + dy * dy + dz * dz <= 1) { gridC[gi(x, y, z)] = 1; break; }
+          }
+        }
+    // simple face culling (cell size 2)
+    const pos = [], nor = [], idx = [];
+    const CS = 2;
+    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+    const quads = [
+      [[1, -1, -1], [1, 1, -1], [1, 1, 1], [1, -1, 1]],
+      [[-1, -1, 1], [-1, 1, 1], [-1, 1, -1], [-1, -1, -1]],
+      [[-1, 1, 1], [1, 1, 1], [1, 1, -1], [-1, 1, -1]],
+      [[-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1]],
+      [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]],
+      [[1, -1, -1], [-1, -1, -1], [-1, 1, -1], [1, 1, -1]]
+    ];
+    for (let y = -ext; y <= ext; y++)
+      for (let z = -ext; z <= ext; z++)
+        for (let x = -ext; x <= ext; x++) {
+          if (!gridC[gi(x, y, z)]) continue;
+          for (let d = 0; d < 6; d++) {
+            const dd = dirs[d];
+            const nx = x + dd[0], ny = y + dd[1], nz = z + dd[2];
+            if (nx >= -ext && nx <= ext && ny >= -ext && ny <= ext &&
+                nz >= -ext && nz <= ext && gridC[gi(nx, ny, nz)]) continue;
+            const base = pos.length / 3;
+            for (const c of quads[d]) {
+              pos.push((x + c[0] * 0.5) * CS, (y + c[1] * 0.5) * CS, (z + c[2] * 0.5) * CS);
+              nor.push(dd[0], dd[1], dd[2]);
+            }
+            idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+          }
+        }
+    if (!idx.length) continue;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    g.setIndex(idx);
+    g.computeBoundingSphere();
+    const mesh = new THREE.Mesh(g, mat);
+    mesh.position.set(sp.x - CX, sp.y, sp.z - CZ);        // group pivot at island centre
+    cloudGroup.add(mesh);
+    cloudList.push({ mesh, baseY: sp.y, ph: rnd() * TAU });
+  }
+}
+
+function updateClouds(t, dt) {
+  cloudGroup.rotation.y += dt * 0.004;
+  for (let i = 0; i < cloudList.length; i++) {
+    const c = cloudList[i];
+    c.mesh.position.y = c.baseY + Math.sin(t * 0.25 + c.ph) * 1.5;
+  }
+}
+
+/* ---------------- point lights ---------------- */
+function addPointLights() {
+  for (const L of LIGHTS) {
+    if (pointLights.length >= 14) break;
+    const pl = new THREE.PointLight(0xffa24d, 38 * L.s, 44, 1.3);
+    pl.position.set(L.x, L.y, L.z);
+    scene.add(pl);
+    pointLights.push({ pl, base: 38 * L.s, ph: rnd() * TAU });
+  }
+}
+function flickerLights(t) {
+  for (let i = 0; i < pointLights.length; i++) {
+    const L = pointLights[i];
+    const f = 0.86 + 0.14 * (0.5 + 0.5 * Math.sin(t * 6.3 + L.ph) * Math.sin(t * 2.7 + L.ph * 1.7));
+    L.pl.intensity = L.base * f;
+  }
+}
+
+/* ---------------- flying Ford Anglia ---------------- */
+let carGroup, carBeam;
+const carState = { th: 0.7 };
+
+function voxBox(arr, x0, y0, z0, x1, y1, z1, col) {
+  for (let y = y0; y <= y1; y++)
+    for (let z = z0; z <= z1; z++)
+      for (let x = x0; x <= x1; x++) arr.push([x, y, z, col]);
+}
+// merged culled voxel cells → geometry with vertex colours
+function voxGeom(cells) {
+  const occ = new Set();
+  for (const c of cells) occ.add(c[0] + ',' + c[1] + ',' + c[2]);
+  const pos = [], nor = [], col = [], idx = [];
+  const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+  const quads = [
+    [[1, -1, -1], [1, 1, -1], [1, 1, 1], [1, -1, 1]],
+    [[-1, -1, 1], [-1, 1, 1], [-1, 1, -1], [-1, -1, -1]],
+    [[-1, 1, 1], [1, 1, 1], [1, 1, -1], [-1, 1, -1]],
+    [[-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1]],
+    [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]],
+    [[1, -1, -1], [-1, -1, -1], [-1, 1, -1], [1, 1, -1]]
+  ];
+  for (const c of cells) {
+    const x = c[0], y = c[1], z = c[2], cr = c[3];
+    for (let f = 0; f < 6; f++) {
+      const d = dirs[f];
+      if (occ.has((x + d[0]) + ',' + (y + d[1]) + ',' + (z + d[2]))) continue;
+      const base = pos.length / 3;
+      for (const k of quads[f]) {
+        pos.push(x + k[0] * 0.5, y + k[1] * 0.5, z + k[2] * 0.5);
+        nor.push(d[0], d[1], d[2]);
+        col.push(cr[0], cr[1], cr[2]);
+      }
+      idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setIndex(idx);
+  return g;
+}
+// unlit over-bright lamp cells
+function lampGeom(cells) {
+  const pos = [], nor = [], idx = [];
+  const quads = [
+    [[1, -1, -1], [1, 1, -1], [1, 1, 1], [1, -1, 1]],
+    [[-1, -1, 1], [-1, 1, 1], [-1, 1, -1], [-1, -1, -1]],
+    [[-1, 1, 1], [1, 1, 1], [1, 1, -1], [-1, 1, -1]],
+    [[-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1]],
+    [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]],
+    [[1, -1, -1], [-1, -1, -1], [-1, 1, -1], [1, 1, -1]]
+  ];
+  const dirs = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+  for (const c of cells) {
+    for (let f = 0; f < 6; f++) {
+      const d = dirs[f];
+      const base = pos.length / 3;
+      for (const k of quads[f]) {
+        pos.push(c[0] + k[0] * 0.5, c[1] + k[1] * 0.5, c[2] + k[2] * 0.5);
+        nor.push(d[0], d[1], d[2]);
+      }
+      idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setIndex(idx);
+  return g;
+}
+
+function initCar() {
+  const lin = h => { const c = new THREE.Color(h); return [c.r, c.g, c.b]; };
+  const CARB = lin(0x6d9cc2), GLASSB = lin(0x2c3a5a);
+  const CHROME = lin(0xb8bec6), TYRE = lin(0x141418);
+  const body = [];
+  voxBox(body, -2, 0, -4, 1, 0, 3, CARB);                       // 4×8 chassis, front = +z
+  voxBox(body, -2, 1, -3, 1, 1, 2, CARB);                       // cabin row 1
+  for (let x = -2; x <= 1; x++)                                 // window band with corner pillars
+    for (let z = -3; z <= 2; z++) {
+      const perimeter = x === -2 || x === 1 || z === -3 || z === 2;
+      if (!perimeter) continue;
+      const pillar = (x === -2 || x === 1) && (z === -3 || z === 2);
+      body.push([x, 2, z, pillar ? CARB : GLASSB]);
+    }
+  voxBox(body, -2, 3, -3, 1, 3, 2, CARB);                       // roof
+  // bumpers (headlight/taillight cells left to the lamp meshes)
+  for (let x = -2; x <= 1; x++) {
+    if (x !== -1 && x !== 0) body.push([x, 1, 4, CHROME]);
+    if (x !== -1 && x !== 0) body.push([x, 1, -5, CHROME]);
+  }
+  voxBox(body, -3, 0, -3, -3, 0, 2, TYRE);                      // tyres
+  voxBox(body, 2, 0, -3, 2, 0, 2, TYRE);
+  body.push([-3, 0, -3, TYRE]); body.push([2, 0, -3, TYRE]);
+  body.push([-3, 0, 2, TYRE]); body.push([2, 0, 2, TYRE]);
+
+  carGroup = new THREE.Group();
+  const bodyMesh = new THREE.Mesh(voxGeom(body),
+    new THREE.MeshLambertMaterial({ vertexColors: true }));
+  bodyMesh.castShadow = true;
+  carGroup.add(bodyMesh);
+
+  const head = new THREE.Mesh(lampGeom([[-1, 1, 5], [0, 1, 5]]),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(2.4, 2.2, 1.5) }));
+  carGroup.add(head);
+  const tail = new THREE.Mesh(lampGeom([[-1, 1, -6], [0, 1, -6]]),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(2.0, 0.15, 0.15) }));
+  carGroup.add(tail);
+
+  carBeam = new THREE.PointLight(0xfff2dd, 45, 45);
+  carBeam.position.set(0, 1, 9);                               // 9 units ahead
+  carGroup.add(carBeam);
+
+  carGroup.scale.set(1.3, 1.3, 1.3);
+  scene.add(carGroup);
+}
+
+function updateFlyingCar(t, dt) {
+  carState.th += 0.1 * dt;
+  const th = carState.th;
+  const px = th2 => 148 + 98 * Math.cos(th2);
+  const pz = th2 => 145 + 95 * Math.sin(th2);
+  const py = th2 => PLAT_Y + 50 + 10 * Math.sin(2 * th2) + 3 * Math.sin(3 * th2);
+  const x = px(th), z = pz(th);
+  const y = py(th) + 1.2 * Math.sin(2.4 * t) + 0.3 * Math.sin(5.3 * t);
+  carGroup.position.set(x, y, z);
+  const ahead = 0.12;
+  carGroup.lookAt(px(th + ahead), py(th + ahead), pz(th + ahead));
+  carGroup.rotateZ(0.16 + 0.1 * Math.sin(1.7 * t));            // bank + wobble
+  carGroup.rotateX(0.07 * Math.sin(2.4 * t + 1));              // nose bob
+}/* ============================================================
+   08_main.js — camera controls, build pipeline, render loop
+   (PROJECT.md §12 & §13)
+   ============================================================ */
+
+const view = {
+  target: new THREE.Vector3(CX + 4, PLAT_Y - 4, CZ + 4),
+  yaw: 0.62, pitch: 0.6155, dist: 330, distGoal: 330,
+  ortho: true
+};
+const HOME = { yaw: 0.62, pitch: 0.6155, dist: 330 };
+let autoOrbit = false;
+const keys = {};
+let triCount = 0;
+let activeCam = null;
+
+function camDir() {
+  const cp = Math.cos(view.pitch);
+  return new THREE.Vector3(
+    Math.sin(view.yaw) * cp,
+    Math.sin(view.pitch),
+    Math.cos(view.yaw) * cp
+  );
+}
+
+function updateCamera() {
+  const dir = camDir();
+  const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  if (view.ortho) {
+    const halfH = view.dist * 0.42;
+    camOrtho.left = -halfH * aspect; camOrtho.right = halfH * aspect;
+    camOrtho.top = halfH; camOrtho.bottom = -halfH;
+    camOrtho.updateProjectionMatrix();
+    camOrtho.position.copy(view.target).addScaledVector(dir, 1500);
+    camOrtho.lookAt(view.target);
+    activeCam = camOrtho;
+  } else {
+    camPersp.aspect = aspect;
+    camPersp.updateProjectionMatrix();
+    camPersp.position.copy(view.target).addScaledVector(dir, view.dist);
+    camPersp.lookAt(view.target);
+    activeCam = camPersp;
+  }
+  renderPass.camera = activeCam;
+}
+
+function updateMoonView() {
+  const dir = camDir();
+  const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+  if (view.ortho) {
+    updateMoon(activeCam, dir, view.target, view.dist * 0.42, Math.tan(55 * DEG), aspect);
+  } else {
+    const tanV = Math.tan(22.5 * DEG);
+    updateMoon(activeCam, dir, view.target, 1400 * tanV, tanV, aspect);
+  }
+}
+
+/* ---------------- input ---------------- */
+const k = code => !!keys[code];
+
+function applyKeys(dt) {
+  let sp = Math.max(12, view.dist * 0.75) * dt;
+  if (k('ShiftLeft') || k('ShiftRight')) sp *= 3;
+  const dir = camDir();
+  const fwd = view.ortho
+    ? new THREE.Vector3(-Math.sin(view.yaw), 0, -Math.cos(view.yaw))
+    : dir.clone().negate();
+  const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0));
+  if (right.lengthSq() > 1e-6) right.normalize();
+  const move = new THREE.Vector3();
+  if (k('KeyW')) move.add(fwd);
+  if (k('KeyS')) move.sub(fwd);
+  if (k('KeyD')) move.add(right);
+  if (k('KeyA')) move.sub(right);
+  if (k('KeyR') || k('Space')) move.y += 1;
+  if (k('KeyF') || k('KeyC')) move.y -= 1;
+  if (move.lengthSq() > 0) view.target.addScaledVector(move.normalize(), sp);
+
+  let rot = 0;
+  if (k('KeyQ') || k('ArrowLeft')) rot -= 1;
+  if (k('KeyE') || k('ArrowRight')) rot += 1;
+  view.yaw += rot * 1.6 * dt;
+  if (autoOrbit) view.yaw += 0.15 * dt;
+  if (k('ArrowUp')) view.pitch = clamp(view.pitch + 1.2 * dt, 0.03, 1.5);
+  if (k('ArrowDown')) view.pitch = clamp(view.pitch - 1.2 * dt, 0.03, 1.5);
+
+  let z = 0;
+  if (k('Equal') || k('NumpadAdd') || k('KeyZ') || k('PageUp')) z += 1;
+  if (k('Minus') || k('NumpadSubtract') || k('KeyX') || k('PageDown')) z -= 1;
+  if (z !== 0) view.distGoal = clamp(view.distGoal * Math.exp(-z * 2 * dt), 6, 900);
+}
+
+function resetView() {
+  view.yaw = HOME.yaw; view.pitch = HOME.pitch;
+  view.dist = HOME.dist; view.distGoal = HOME.dist;
+  view.ortho = true; autoOrbit = false;
+  view.target.set(CX + 4, PLAT_Y - 4, CZ + 4);
+}
+
+function setupInput() {
+  const cv = renderer.domElement;
+  addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+         'PageUp', 'PageDown', 'Home'].includes(e.code)) e.preventDefault();
+    if (e.repeat) return;
+    if (e.code === 'KeyP') view.ortho = !view.ortho;
+    else if (e.code === 'KeyT') autoOrbit = !autoOrbit;
+    else if (e.code === 'Digit0' || e.code === 'Home') resetView();
+    else if (e.code === 'KeyH') document.getElementById('hud').classList.toggle('collapsed');
+  });
+  addEventListener('keyup', e => { keys[e.code] = false; });
+  addEventListener('blur', () => { for (const kk in keys) keys[kk] = false; });
+
+  let drag = 0, lastX = 0, lastY = 0;
+  cv.addEventListener('contextmenu', e => e.preventDefault());
+  cv.addEventListener('mousedown', e => {
+    drag = (e.button === 2 || e.button === 1 || e.shiftKey) ? 2 : 1;
+    lastX = e.clientX; lastY = e.clientY;
+  });
+  addEventListener('mouseup', () => { drag = 0; });
+  addEventListener('mousemove', e => {
+    if (!drag) return;
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    if (drag === 1) {
+      view.yaw -= dx * 0.006;
+      view.pitch = clamp(view.pitch + dy * 0.006, 0.03, 1.5);
+    } else {
+      panBy(dx, dy);
+    }
+  });
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    view.distGoal = clamp(view.distGoal * Math.pow(1.12, Math.sign(e.deltaY)), 6, 900);
+  }, { passive: false });
+
+  // touch: 1 finger orbits, 2 fingers pinch-zoom + pan
+  let tPrev = null;
+  cv.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) tPrev = { x: e.touches[0].clientX, y: e.touches[0].clientY, d: 0 };
+    else if (e.touches.length === 2) {
+      const a = e.touches[0], b = e.touches[1];
+      tPrev = {
+        x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2,
+        d: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY)
+      };
+    }
+    e.preventDefault();
+  }, { passive: false });
+  cv.addEventListener('touchmove', e => {
+    if (!tPrev) return;
+    if (e.touches.length === 1 && tPrev.d === 0) {
+      const t0 = e.touches[0];
+      view.yaw -= (t0.clientX - tPrev.x) * 0.006;
+      view.pitch = clamp(view.pitch + (t0.clientY - tPrev.y) * 0.006, 0.03, 1.5);
+      tPrev.x = t0.clientX; tPrev.y = t0.clientY;
+    } else if (e.touches.length === 2) {
+      const a = e.touches[0], b = e.touches[1];
+      const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      if (tPrev.d > 0) view.distGoal = clamp(view.distGoal * (tPrev.d / d), 6, 900);
+      const mx = (a.clientX + b.clientX) / 2, my = (a.clientY + b.clientY) / 2;
+      panBy(mx - tPrev.x, my - tPrev.y);
+      tPrev.x = mx; tPrev.y = my; tPrev.d = d;
+    }
+    e.preventDefault();
+  }, { passive: false });
+  cv.addEventListener('touchend', () => { tPrev = null; });
+
+  document.getElementById('toggle').addEventListener('click', function () {
+    const hud = document.getElementById('hud');
+    const stats = document.getElementById('stats');
+    const hidden = hud.style.display === 'none';
+    hud.style.display = hidden ? '' : 'none';
+    stats.style.display = hidden ? '' : 'none';
+    this.textContent = hidden ? 'hide UI' : 'show UI';
+  });
+  addEventListener('resize', onResize);
+}
+
+function panBy(dx, dy) {
+  const dir = camDir();
+  const fwd = dir.clone().negate();
+  const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0));
+  if (right.lengthSq() > 1e-6) right.normalize();
+  const up = new THREE.Vector3().crossVectors(right, fwd).normalize();
+  const s = view.dist * 0.0016;
+  view.target.addScaledVector(right, -dx * s).addScaledVector(up, dy * s);
+}
+
+function onResize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  composer.setSize(w, h);
+  camPersp.aspect = w / Math.max(1, h);
+  camPersp.updateProjectionMatrix();
+}
+
+/* ---------------- loader / HUD ---------------- */
+function setProgress(p, label) {
+  const fill = document.getElementById('lfill');
+  if (fill) fill.style.width = (p * 100).toFixed(0) + '%';
+  if (label) document.getElementById('lstatus').textContent = label;
+}
+const nextTick = () => new Promise(r => setTimeout(r, 0));
+
+/* ---------------- build pipeline ---------------- */
+async function main() {
+  initScene();
+  setupInput();
+  updateCamera();
+
+  setProgress(0.03, 'carving the floating island…');
+  await nextTick();
+  buildTerrain();
+
+  setProgress(0.20, 'raising the castle…');
+  await nextTick();
+  buildCastle();
+
+  setProgress(0.35, 'planting the grounds…');
+  await nextTick();
+  buildGrounds();
+
+  setProgress(0.42, 'meshing voxels…');
+  await nextTick();
+  const m = await addChunkMeshes(voxelGroup,
+    [MAT_SOLID, MAT_EMISSIVE, MAT_WATER, MAT_GLASS],
+    f => setProgress(0.42 + f * 0.5, 'meshing voxels…'));
+  triCount = m.tris;
+
+  setProgress(0.93, 'drifting clouds…');
+  await nextTick();
+  buildClouds();
+
+  setProgress(0.97, 'lighting lanterns…');
+  await nextTick();
+  addPointLights();
+
+  setProgress(1, 'expecto patronum');
+  window.hogwarts = { view, scene, get, PAL };
+  await nextTick();
+  document.getElementById('loader').classList.add('done');
+  loop();
+}
+
+/* ---------------- render loop ---------------- */
+let lastT = performance.now(), fpsN = 0, fpsT = 0, fpsShown = 0;
+function loop() {
+  requestAnimationFrame(loop);
+  const now = performance.now();
+  let dt = (now - lastT) / 1000;
+  lastT = now;
+  if (dt > 0.1) dt = 0.1;
+  const t = now / 1000;
+
+  applyKeys(dt);
+  view.dist += (view.distGoal - view.dist) * Math.min(1, dt * 8);
+  updateCamera();
+  updateClouds(t, dt);
+  updateFlyingCar(t, dt);
+  flickerLights(t);
+  updateMoonView();
+  composer.render();
+
+  fpsN++; fpsT += dt;
+  if (fpsT >= 0.5) {
+    fpsShown = Math.round(fpsN / fpsT);
+    fpsN = 0; fpsT = 0;
+    const el = document.getElementById('stats');
+    if (el) el.textContent =
+      fpsShown + ' fps · ' + triCount.toLocaleString('en-US') + ' tris · ' +
+      (view.ortho ? 'isometric' : 'perspective') + (autoOrbit ? ' · orbit' : '');
+  }
+}
+
+main();</script>
+</body>
+</html>

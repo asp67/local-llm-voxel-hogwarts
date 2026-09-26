@@ -1,0 +1,2331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Voxel Hogwarts — Night Diorama (V2)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#050817;overflow:hidden;
+    font:12px/1.5 "Segoe UI",system-ui,-apple-system,sans-serif;color:#c9d1ee;
+    -webkit-user-select:none;user-select:none}
+  #app{position:fixed;inset:0}
+  #app canvas{display:block;width:100%;height:100%;image-rendering:pixelated;image-rendering:crisp-edges}
+
+  /* ── loader ── */
+  #loader{position:fixed;inset:0;z-index:40;display:flex;flex-direction:column;gap:14px;
+    align-items:center;justify-content:center;text-align:center;
+    background:radial-gradient(ellipse at 50% 38%,#101a3d 0%,#050817 68%);
+    transition:opacity .7s ease .15s}
+  #loader h1{margin:0;font-size:30px;letter-spacing:.42em;color:#d9b96a;font-weight:600;text-indent:.42em}
+  #loader p{margin:0;color:#8b96c4;letter-spacing:.22em;font-size:11px;text-indent:.22em}
+  #bar{width:300px;height:7px;border-radius:4px;background:#131c40;border:1px solid #232f60;overflow:hidden}
+  #fill{height:100%;width:0%;border-radius:4px;background:linear-gradient(90deg,#5b74c0,#ffa845);transition:width .25s}
+  #lstep{color:#7281b5;font-size:11px;letter-spacing:.14em;min-height:15px}
+  #lerr{color:#ff8a7a;font-size:11px;max-width:520px;white-space:pre-wrap;display:none}
+
+  /* ── HUD ── */
+  #hud{position:fixed;left:10px;top:8px;z-index:10;font:11px/1.4 Consolas,monospace;color:#aeb9e2;
+    text-shadow:0 1px 3px rgba(0,0,0,.9);pointer-events:none}
+  #hud b{color:#ffd08a;font-weight:600;letter-spacing:.3em}
+  #stats{color:#7f8cc0}
+
+  #help{position:fixed;right:10px;bottom:10px;z-index:10;max-width:270px;padding:10px 12px;
+    background:rgba(9,13,32,.72);border:1px solid #26305e;border-radius:8px;backdrop-filter:blur(3px);
+    font-size:11px;line-height:1.55;color:#93a0cf}
+  #help b{color:#ffd08a;letter-spacing:.16em}
+  #help .k{color:#e8ecff;background:#1d274f;border:1px solid #31406f;border-radius:3px;
+    padding:0 4px;margin-right:3px;font:10px Consolas,monospace}
+  #help.packed{display:none}
+  #hint{position:fixed;left:50%;bottom:12px;transform:translateX(-50%);z-index:9;
+    color:#66719e;font-size:11px;letter-spacing:.12em;text-shadow:0 1px 3px #000;transition:opacity 1s}
+</style>
+<script>
+window.addEventListener('error', e => {
+  const el = document.getElementById('lerr');
+  if (!el) return;
+  el.style.display = 'block';
+  el.textContent = (el.textContent ? el.textContent + '\n' : '') +
+    'Error: ' + (e.message || e.error || e) +
+    (e.filename ? '\n  at ' + e.filename + ':' + e.lineno : '');
+});
+</script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="loader">
+  <h1>HOGWARTS</h1>
+  <p>VOXEL&nbsp;NIGHT&nbsp;DIORAMA</p>
+  <div id="bar"><div id="fill"></div></div>
+  <div id="lstep">raising the stones…</div>
+  <div id="lerr"></div>
+</div>
+
+<div id="hud"><b>VOXEL HOGWARTS</b><div id="stats">…</div></div>
+
+<div id="help">
+  <b>CONTROLS</b><br>
+  <span class="k">W A S D</span> move &nbsp;<span class="k">R F</span> / <span class="k">Q E</span> rise·turn<br>
+  <span class="k">drag</span> orbit &nbsp;<span class="k">right-drag</span> pan &nbsp;<span class="k">wheel</span> zoom<br>
+  <span class="k">P</span> isometric ⇄ perspective &nbsp;<span class="k">T</span> auto-orbit<br>
+  <span class="k">0</span> reset view &nbsp;<span class="k">H</span> panel &nbsp;<span class="k">Shift</span> 3× speed
+</div>
+<div id="hint">drag to orbit · wheel to zoom · P for perspective</div>
+
+<script type="module">
+/* ════════════════════════════════════════════════════════════════════
+   01_core.js — voxel grid, constants, palette, noise, RNG, primitives
+   ════════════════════════════════════════════════════════════════════ */
+import * as THREE from 'three';
+import { EffectComposer }  from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass }      from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass }      from 'three/addons/postprocessing/OutputPass.js';
+
+/* ── world constants ── */
+const W = 288, H = 208, D = 288;
+const CX = 144, CZ = 144, R = 132;
+const LAKE_Y = 63, BASE_Y = 65, PLAT_Y = 100, GROUND2 = BASE_Y + 18;   /* 83 */
+const S = 0.12;                                  /* voxel per plan pixel */
+const DR = Math.PI / 180;
+const PX = px => Math.round(CX + (px - 1100) * S);   /* plan x → voxel x (east=+x) */
+const PZ = py => Math.round(CZ + (py - 1080) * S);   /* plan y → voxel z (south=+z) */
+const PF = px => CX + (px - 1100) * S;               /* float variants */
+const QZ = py => CZ + (py - 1080) * S;
+
+/* ── grid ── */
+const grid = new Uint8Array(W * H * D);
+const topY = new Uint8Array(W * D);          /* y of top solid (non-liquid) voxel, 0 = none */
+const I  = (x, y, z) => x + W * (z + D * y);
+const inb = (x, y, z) => x >= 0 && x < W && y >= 0 && y < H && z >= 0 && z < D;
+const get = (x, y, z) => inb(x, y, z) ? grid[I(x, y, z)] : 0;
+const surfY = (x, z) => (x >= 0 && x < W && z >= 0 && z < D) ? topY[x + W * z] : 0;
+const surfTop = (x, z) => surfY(x, z) + 1;
+
+function set(x, y, z, m) {
+  if (!inb(x, y, z)) return;
+  const i = I(x, y, z); grid[i] = m;
+  const t = x + W * z;
+  if (m && KIND[m] >= 3) return;                       /* water/glass never raise topY */
+  if (m) { if (y > topY[t]) topY[t] = y; }
+  else if (y >= topY[t]) {                             /* carve: rescan the column */
+    let yy = y;
+    while (yy > 0) { const g = grid[I(x, yy, z)]; if (g && KIND[g] < 3) break; yy--; }
+    topY[t] = yy;
+  }
+}
+
+/* ── palette ── */
+const PAL = [null], MAT = { AIR: 0 };
+function mat(name, hex, kind = 1, vary = 0.05) {
+  const c = new THREE.Color(hex);
+  const id = PAL.push({ name, hex, kind, vary, c }) - 1;
+  MAT[name] = id; return id;
+}
+mat('STONE',  '#857563', 1, 0.05);   mat('STONE2', '#665a4d', 1, 0.05);
+mat('STONE3', '#a1917b', 1, 0.05);
+mat('ROOF',   '#33457e', 1, 0.04);   mat('ROOF2',  '#243260', 1, 0.04);
+mat('COPPER', '#4f9483', 1, 0.05);
+mat('WIN',    '#ffa845', 2, 0.10);   mat('WIN2',   '#ffcf78', 2, 0.08);
+mat('WINDK',  '#1a2034', 1, 0.06);
+mat('GRASS',  '#3b5a2d', 1, 0.10);   mat('GRASS2', '#2f4b27', 1, 0.10);
+mat('MOSS',   '#46552f', 1, 0.10);
+mat('DIRT',   '#5a4532', 1, 0.08);
+mat('ROCK',   '#5d5852', 1, 0.07);   mat('ROCK2',  '#4a4540', 1, 0.07);
+mat('ROCK3',  '#6e675e', 1, 0.06);
+mat('UNDER',  '#3a332e', 1, 0.07);
+mat('WATER',  '#1c3f78', 3, 0.02);   mat('FOAM',   '#9fc3e8', 3, 0.10);
+mat('GLASS',  '#86c7b4', 4, 0.03);
+mat('WOOD',   '#5a3b22', 1, 0.07);   mat('WOOD2',  '#7b5534', 1, 0.07);
+mat('TRUNK',  '#3a2a1b', 1, 0.08);
+mat('LEAF',   '#1f3b26', 1, 0.12);   mat('LEAF2',  '#2b4b2b', 1, 0.12);
+mat('LEAF3',  '#162c1e', 1, 0.12);
+mat('LANT',   '#ffcf6b', 2, 0.06);   mat('CANDLE', '#fff1c4', 2, 0.05);
+mat('PATH',   '#7a7062', 1, 0.09);   mat('GRAVEL', '#6b6357', 1, 0.10);
+mat('SAND',   '#8a7b5f', 1, 0.09);
+mat('GOLD',   '#d4a93a', 1, 0.08);
+mat('RED',    '#8e1f1f', 1, 0.06);   mat('GREENH', '#1f6b3a', 1, 0.06);
+mat('BLUEH',  '#23408e', 1, 0.06);   mat('YELL',   '#c9a227', 1, 0.06);
+mat('PUMPK',  '#d9731c', 1, 0.08);
+mat('PALEST', '#9b978f', 1, 0.05);
+mat('CLOCK',  '#e8dcb0', 2, 0.03);
+mat('TRAINR', '#9b1b1b', 1, 0.05);   mat('BLACK',  '#1b1b20', 1, 0.04);
+mat('IRON',   '#2b2b31', 1, 0.05);
+mat('CARB',   '#6d9cc2', 1, 0.05);
+mat('PLANT',  '#3f7a3a', 1, 0.12);
+mat('SQUID',  '#3d2c44', 1, 0.05);
+mat('CRYST',  '#6fb6ff', 2, 0.10);
+
+const KIND = new Uint8Array(256), VARY = new Float32Array(256);
+const CCH = new Float32Array(256 * 3);
+for (let i = 1; i < PAL.length; i++) {
+  KIND[i] = PAL[i].kind; VARY[i] = PAL[i].vary;
+  CCH[i * 3] = PAL[i].c.r; CCH[i * 3 + 1] = PAL[i].c.g; CCH[i * 3 + 2] = PAL[i].c.b;
+}
+/* material id constants used by every build module */
+const { STONE, STONE2, STONE3, ROOF, ROOF2, COPPER, WIN, WIN2, WINDK,
+        GRASS, GRASS2, MOSS, DIRT, ROCK, ROCK2, ROCK3, UNDER, WATER, FOAM, GLASS,
+        WOOD, WOOD2, TRUNK, LEAF, LEAF2, LEAF3, LANT, CANDLE, PATH, GRAVEL, SAND,
+        GOLD, RED, GREENH, BLUEH, YELL, PUMPK, PALEST, CLOCK, TRAINR, BLACK, IRON,
+        CARB, PLANT, SQUID, CRYST } = MAT;
+
+/* ── noise & randomness ── */
+function hash(x, y, z, w = 0) {
+  let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^
+          Math.imul(z | 0, 1442695041) ^ Math.imul(w | 0, 2654435761) ^ 0x9e3779b9;
+  h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+function vnoise(x, z, s = 0) {
+  const xi = Math.floor(x), zi = Math.floor(z), xf = x - xi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf), v = zf * zf * (3 - 2 * zf);
+  const a = hash(xi, zi, 0, s),     b = hash(xi + 1, zi, 0, s);
+  const c = hash(xi, zi + 1, 0, s), d = hash(xi + 1, zi + 1, 0, s);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function fbm(x, z, oct = 4, s = 0) {
+  let a = 0.5, f = 1, t = 0, n = 0;
+  for (let i = 0; i < oct; i++) { t += a * vnoise(x * f, z * f, s + i * 7); n += a; a *= 0.5; f *= 2; }
+  return t / n;
+}
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const RNG = mulberry32(19910731);
+const rnd = () => RNG();
+
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+
+/* ── primitives ── */
+function fillBox(x0, y0, z0, x1, y1, z1, m) {
+  for (let y = y0; y <= y1; y++) for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++)
+    set(x, y, z, m);
+}
+function fillDisk(cx, cz, y, r, m) {
+  const ri = Math.ceil(r);
+  for (let dz = -ri; dz <= ri; dz++) for (let dx = -ri; dx <= ri; dx++)
+    if (dx * dx + dz * dz <= r * r + 0.25) set(cx + dx, y, cz + dz, m);
+}
+function fillCyl(cx, cz, y0, y1, r, m) { for (let y = y0; y <= y1; y++) fillDisk(cx, cz, y, r, m); }
+function dropFill(x, z, y0, m, max = 75, pierce = false) {
+  let y = y0;
+  for (let n = 0; n < max && y >= 0; n++) {
+    const g = get(x, y, z);
+    if (g && (!pierce || KIND[g] !== 3)) break;   /* pierce continues through water */
+    set(x, y, z, m); y--;
+  }
+}
+/* rotated-rect iteration: hands local (u along length, v across) + world voxel coords */
+function oriented2D(cx, cz, angDeg, hl, hw, fn) {
+  const a = angDeg * DR, ca = Math.cos(a), sa = Math.sin(a);
+  const rad = Math.ceil(Math.hypot(hl, hw)) + 2;
+  for (let z = Math.floor(cz) - rad; z <= Math.ceil(cz) + rad; z++)
+    for (let x = Math.floor(cx) - rad; x <= Math.ceil(cx) + rad; x++) {
+      const dx = x - cx, dz = z - cz;
+      const u = dx * ca + dz * sa, v = -dx * sa + dz * ca;
+      if (u >= -hl - 0.49 && u <= hl + 0.49 && v >= -hw - 0.49 && v <= hw + 0.49)
+        fn(u, v, x, z);
+    }
+}
+function toWorld2(cx, cz, angDeg, u, v) {
+  const a = angDeg * DR, ca = Math.cos(a), sa = Math.sin(a);
+  return [cx + u * ca - v * sa, cz + u * sa + v * ca];
+}
+function lineV(x0, y0, z0, x1, y1, z1, m, th = 0) {
+  const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), Math.abs(z1 - z0), 1);
+  for (let i = 0; i <= n; i++) {
+    const x = Math.round(lerp(x0, x1, i / n)), y = Math.round(lerp(y0, y1, i / n)),
+          z = Math.round(lerp(z0, z1, i / n));
+    if (th) fillBox(x - th, y - th, z - th, x + th, y + th, z + th, m); else set(x, y, z, m);
+  }
+}
+
+/* shared state used across build modules */
+const POINTS = [];                        /* warm point lights: {x,y,z,s} */
+/* ════════════════════════════════════════════════════════════════════
+   02_terrain.js — the multi-tiered floating island
+   ════════════════════════════════════════════════════════════════════ */
+
+const INF = 1 << 24;
+
+/* two-pass chamfer distance transform (1, √2 ≈ 3, 4.24/3) over a 288×288 mask */
+function chamfer(mask) {
+  const d = new Int32Array(W * D);
+  for (let i = 0; i < W * D; i++) d[i] = mask[i] ? 0 : INF;
+  for (let z = 0; z < D; z++) for (let x = 0; x < W; x++) {
+    const i = x + W * z; let v = d[i];
+    if (v === 0) continue;
+    if (x > 0)               { const t = d[i - 1] + 3;     if (t < v) v = t; }
+    if (z > 0)               { const t = d[i - W] + 3;     if (t < v) v = t; }
+    if (x > 0 && z > 0)      { const t = d[i - 1 - W] + 4; if (t < v) v = t; }
+    if (x < W - 1 && z > 0)  { const t = d[i + 1 - W] + 4; if (t < v) v = t; }
+    d[i] = v;
+  }
+  for (let z = D - 1; z >= 0; z--) for (let x = W - 1; x >= 0; x--) {
+    const i = x + W * z; let v = d[i];
+    if (v === 0) continue;
+    if (x < W - 1)           { const t = d[i + 1] + 3;     if (t < v) v = t; }
+    if (z < D - 1)           { const t = d[i + W] + 3;     if (t < v) v = t; }
+    if (x < W - 1 && z < D - 1) { const t = d[i + 1 + W] + 4; if (t < v) v = t; }
+    if (x > 0 && z < D - 1)     { const t = d[i - 1 + W] + 4; if (t < v) v = t; }
+    d[i] = v;
+  }
+  return d;
+}
+
+function buildTerrain() {
+  const F  = (x, z) => fbm(x * 0.028, z * 0.028, 4, 101);   /* broad swell */
+  const F2 = (x, z) => fbm(x * 0.11,  z * 0.11,  3, 202);   /* cliff detail */
+
+  /* rim radius: jittered ±2.5 by angular noise */
+  const edge = new Float32Array(W * D);
+  for (let z = 0; z < D; z++) for (let x = 0; x < W; x++) {
+    const dx = x - CX, dz = z - CZ, d = Math.hypot(dx, dz), i = x + W * z;
+    if (d < R - 14) edge[i] = R;
+    else {
+      const th = Math.atan2(dz, dx);
+      edge[i] = R + (vnoise(Math.cos(th) * 4 + 70, Math.sin(th) * 4 + 70, 707) - 0.5) * 5;
+    }
+  }
+
+  /* ── region masks, written in plan-pixel space ── */
+  const mC = new Uint8Array(W * D), mG = new Uint8Array(W * D);
+  const CRECTS = [
+    [1110, 430, 1590, 1035], [945, 585, 1285, 925], [1265, 570, 1435, 1150],
+    [1185, 1025, 1515, 1185], [875, 900, 1095, 1100], [1090, 900, 1225, 1030],
+    [1025, 365, 1185, 600], [755, 1160, 1135, 1515], [405, 1240, 715, 1435]
+  ];
+  const ORIENTS = [        /* cx, cz (plan), angle°, halfLen px, halfWid px */
+    [835, 640, -22, 150, 95], [890, 700, 19, 125, 55], [1125, 1655, -34.9, 240, 95]
+  ];
+  const CIRCLES = [[1100, 1490, 115], [1330, 1600, 45]];
+  const GPOLY = [
+    [1110, 360], [1000, 175], [890, 125], [660, 135], [520, 330],
+    [470, 420], [560, 520], [720, 520], [950, 560], [1070, 560]
+  ];
+  for (let z = 0; z < D; z++) for (let x = 0; x < W; x++) {
+    const px = 1100 + (x - CX) / S, pz = 1080 + (z - CZ) / S, i = x + W * z;
+    for (const [a, b, c, d] of CRECTS)
+      if (px >= a && px <= c && pz >= b && pz <= d) { mC[i] = 1; break; }
+    if (!mC[i]) for (const [ox, oz, ang, hl, hw] of ORIENTS) {
+      const a = ang * DR, ca = Math.cos(a), sa = Math.sin(a);
+      const dx = px - ox, dz = pz - oz;
+      const u = dx * ca + dz * sa, v = -dx * sa + dz * ca;
+      if (u >= -hl && u <= hl && v >= -hw && v <= hw) { mC[i] = 1; break; }
+    }
+    if (!mC[i]) for (const [ox, oz, pr] of CIRCLES) {
+      const dx = px - ox, dz = pz - oz;
+      if (dx * dx + dz * dz <= pr * pr) { mC[i] = 1; break; }
+    }
+    /* grounds polygon: even-odd ray cast */
+    let ins = false;
+    for (let a = 0, b = GPOLY.length - 1; a < GPOLY.length; b = a++) {
+      const ax = GPOLY[a][0], az = GPOLY[a][1], bx = GPOLY[b][0], bz = GPOLY[b][1];
+      if ((az > pz) !== (bz > pz) &&
+          px < (bx - ax) * (pz - az) / (bz - az) + ax) ins = !ins;
+    }
+    mG[i] = ins ? 1 : 0;
+  }
+  const dC = chamfer(mC), dG = chamfer(mG);
+
+  /* small hills, given directly in voxel space */
+  const HILLS = [
+    { x: 50, z: 190, r: 8.4, y: BASE_Y + 3 },         /* Hagrid's mound    */
+    { x: 30, z: 160, r: 10,  y: BASE_Y + 4 },         /* stone circle hill */
+    { rect: [221, 206, 238, 229], y: LAKE_Y + 2 }     /* boathouse rock    */
+  ];
+
+  /* ── pass 1: column heights ── */
+  const hmap = new Int16Array(W * D);
+  const flag = new Uint8Array(W * D);   /* 1 bed · 2 beach · 4 lip · 8 water */
+  const FALLX = CX + 0.2 * R, FALLZ = CZ + 0.98 * R;
+
+  for (let z = 0; z < D; z++) for (let x = 0; x < W; x++) {
+    const i = x + W * z, dv = Math.hypot(x - CX, z - CZ);
+    if (dv > edge[i]) continue;                          /* open sky beyond rim */
+    let hh = BASE_Y + Math.floor(F(x, z) * 10 - 4);
+    /* castle plateau: cliffs quantised to 3-voxel terraces + 1-voxel ledges */
+    let d = dC[i] / 3;
+    let drop = d * 2.6 * (0.65 + 0.8 * F2(x, z));
+    drop = Math.floor(drop / 3) * 3 + (hash(x, 0, z, 11) < 0.16 ? 1 : 0);
+    hh = Math.max(hh, PLAT_Y - 1 - drop);
+    /* walled grounds tier */
+    d = dG[i] / 3;
+    drop = d * 1.6 * (0.65 + 0.8 * F2(x, z));
+    drop = Math.floor(drop / 3) * 3 + (hash(x, 1, z, 11) < 0.16 ? 1 : 0);
+    hh = Math.max(hh, GROUND2 - drop);
+    /* hills */
+    for (const hll of HILLS) {
+      if (hll.rect) {
+        const x0 = hll.rect[0], z0 = hll.rect[1], x1 = hll.rect[2], z1 = hll.rect[3];
+        if (x >= x0 && x <= x1 && z >= z0 && z <= z1) hh = Math.max(hh, hll.y);
+        else if (x >= x0 - 4 && x <= x1 + 4 && z >= z0 - 4 && z <= z1 + 4) {
+          const ox = Math.max(x0 - x, x - x1, 0), oz = Math.max(z0 - z, z - z1, 0);
+          hh = Math.max(hh, hll.y - Math.hypot(ox, oz) * 1.2);
+        }
+      } else {
+        const dd = Math.hypot(x - hll.x, z - hll.z);
+        if (dd < hll.r + 7) hh = Math.max(hh, hll.y - Math.max(0, dd - hll.r) * 1.1);
+      }
+    }
+    /* the lake */
+    const lf = (z - CZ) + 0.25 * (x - CX) - 36 + (F(x, z) - 0.5) * 40;
+    const nearRim = dv > edge[i] - 4.2;
+    const nearFall = Math.hypot(x - FALLX, z - FALLZ) < 3.6;
+    let fl = 0;
+    if (lf > 0 && hh < BASE_Y + 11) {                         /* lake bed */
+      hh = LAKE_Y - (2 + Math.min(7, Math.floor(lf * 0.14 + F2(x, z) * 2.2)));
+      fl = 1 | 8;
+    } else if (lf > -5 && lf <= 0 && hh < BASE_Y + 12) {      /* beach band */
+      if (hh < LAKE_Y + 1) hh = LAKE_Y + 1;
+      fl = 2;
+    }
+    if (nearRim && lf > -10 && !nearFall) {                   /* stone lip holds water */
+      if (hh < LAKE_Y + 2) hh = LAKE_Y + 2;
+      fl = (fl & ~1) | 4;
+    }
+    hmap[i] = hh; flag[i] = fl;
+  }
+
+  /* ── pass 2a: per-column underside depth field ── */
+  const ybA = new Int16Array(W * D), solidA = new Uint8Array(W * D);
+  for (let z = 0; z < D; z++) for (let x = 0; x < W; x++) {
+    const i = x + W * z;
+    if (hmap[i] === 0 && flag[i] === 0) continue;
+    const dv = Math.hypot(x - CX, z - CZ);
+    if (dv > edge[i]) continue;
+    const F1 = F(x, z);
+    const t = clamp(dv / R, 0, 1);
+    let dep = 8 + 46 * (1 - Math.pow(t, 1.5)) + F1 * 12;
+    dep = Math.floor(dep / 6) * 6;
+    ybA[i] = Math.max(2, LAKE_Y - 6 - dep);
+    solidA[i] = 1;
+  }
+  /* smooth the tier staircase: never open a notch deeper than 5 voxels —
+     fills the see-through gaps between neighbouring tier steps */
+  for (let pass = 0; pass < 2; pass++)
+    for (let z = 1; z < D - 1; z++) for (let x = 1; x < W - 1; x++) {
+      const i = x + W * z;
+      if (!solidA[i]) continue;
+      const lowest = Math.min(
+        solidA[i + 1] ? ybA[i + 1] : ybA[i], solidA[i - 1] ? ybA[i - 1] : ybA[i],
+        solidA[i + W] ? ybA[i + W] : ybA[i], solidA[i - W] ? ybA[i - W] : ybA[i]);
+      if (ybA[i] > lowest + 5) ybA[i] = lowest + 5;
+    }
+  /* outer skirt: the outermost ~16-voxel ring extends down to the depth of the
+     tier ~20 voxels inward, so the ring reads solid from level viewpoints */
+  for (let z = 0; z < D; z++) for (let x = 0; x < W; x++) {
+    const i = x + W * z;
+    if (!solidA[i]) continue;
+    const dv = Math.hypot(x - CX, z - CZ);
+    if (dv <= edge[i] - 16 || dv < 24) continue;
+    const k = (dv - 20) / dv;
+    const xi = Math.round(CX + (x - CX) * k), zi = Math.round(CZ + (z - CZ) * k);
+    if (xi < 0 || xi >= W || zi < 0 || zi >= D) continue;
+    const inner = ybA[xi + W * zi];
+    if (solidA[xi + W * zi] && ybA[i] > inner + 3) ybA[i] = inner + 3;
+  }
+  for (let pass = 0; pass < 3; pass++)
+    for (let z = 1; z < D - 1; z++) for (let x = 1; x < W - 1; x++) {
+      const i = x + W * z;
+      if (!solidA[i]) continue;
+      const lowest = Math.min(
+        solidA[i + 1] ? ybA[i + 1] : ybA[i], solidA[i - 1] ? ybA[i - 1] : ybA[i],
+        solidA[i + W] ? ybA[i + W] : ybA[i], solidA[i - W] ? ybA[i - W] : ybA[i]);
+      if (ybA[i] > lowest + 4) ybA[i] = lowest + 4;
+    }
+
+  /* ── pass 2b: fill columns with strata & surface materials ── */
+  for (let z = 0; z < D; z++) for (let x = 0; x < W; x++) {
+    const i = x + W * z;
+    if (!solidA[i]) continue;
+    const hh = hmap[i], fl = flag[i];
+    const F2c = F2(x, z);
+    const strat = y => (y + Math.floor(F2c * 8)) % 9 < 2;
+    /* steepness from neighbour height drop */
+    let steep = false, rim = Math.hypot(x - CX, z - CZ) > edge[i] - 1.6;
+    const nb = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    for (const [ox, oz] of nb) {
+      const j = (x + ox) + W * (z + oz);
+      if (j >= 0 && j < W * D && hmap[j] !== 0) {
+        if (hh - hmap[j] > 2) steep = true;
+      } else steep = steep || rim;
+    }
+    let topM;
+    if (fl & 4) topM = ROCK3;
+    else if (fl & 2) topM = SAND;
+    else if (fl & 1) topM = hash(x, hh, z, 12) < 0.6 ? DIRT : ROCK2;
+    else if (steep) topM = hash(x, hh, z, 12) < 0.55 ? ROCK : MOSS;
+    else {
+      const vn = vnoise(x * 0.09, z * 0.09, 808);
+      topM = vn < 0.35 ? GRASS2 : (hash(x, hh, z, 12) < 0.85 ? GRASS : MOSS);
+    }
+    if (rim && !(fl & 4)) topM = ROCK3;
+
+    const yb = ybA[i];
+    for (let y = yb; y <= hh; y++) {
+      let m;
+      if (y === hh) m = topM;
+      else if (y < LAKE_Y - 18) {                           /* deep underside core */
+        m = (Math.floor(y + F(x, z) * 6) % 7 < 2) ? UNDER
+            : (hash(x, y, z, 62) < 0.5 ? ROCK : ROCK2);
+      } else if (y >= hh - 2 - Math.floor(hash(x, 0, z, 14) * 2) && !(fl & 1) &&
+                 !(fl & 4) && (topM === GRASS || topM === GRASS2 || topM === MOSS)) {
+        m = DIRT;                                           /* 1–2 soil under turf */
+      } else if (strat(y)) m = hash(x, y, z, 52) < 0.4 ? ROCK : ROCK2;
+      else m = hash(x, y, z, 51) < 0.14 ? ROCK3 : ROCK;
+      set(x, y, z, m);
+    }
+    if (fl & 8) for (let y = hh + 1; y <= LAKE_Y; y++) set(x, y, z, WATER);
+  }
+
+  /* ── stalactites under the island ── */
+  for (let n = 0; n < 70; n++) {
+    const a = rnd() * Math.PI * 2, rr = Math.sqrt(rnd()) * (R - 8);
+    const sx = Math.round(CX + Math.cos(a) * rr), sz = Math.round(CZ + Math.sin(a) * rr);
+    const yb = ybA[sx + W * sz] || (LAKE_Y - 20);
+    const len = 6 + Math.floor(rnd() * 12), cr = 1.5 + rnd() * 2.5;
+    for (let k = 0; k < len; k++) {
+      const r2 = cr * (1 - k / len) + 0.35;
+      fillDisk(sx, sz, yb - k, r2, k < 2 ? ROCK2 : (hash(sx, k, sz, 71) < 0.3 ? UNDER : ROCK2));
+    }
+    if (rnd() < 0.38) { set(sx, yb - len, sz, CRYST); set(sx, yb - len - 1, sz, CRYST); }
+  }
+
+  /* ── the waterfall at the lip gap ── */
+  const ovx = FALLX - CX, ovz = FALLZ - CZ, ol = Math.hypot(ovx, ovz);
+  const ux = ovx / ol, uz = ovz / ol, pw = -uz, qw = ux;   /* outward + across */
+  for (let f = 0; f <= 59; f++) {
+    const y = LAKE_Y - 1 - f;                              /* 62 → 3 */
+    if (y < 3) break;
+    const out = Math.sqrt(f) * 0.9;
+    const bx = FALLX + ux * out, bz = FALLZ + uz * out;
+    const wOut = f > 40 ? 0 : (f > 24 ? 1 : 2);
+    for (let wI = -wOut; wI <= wOut; wI++) {
+      const x = Math.round(bx + pw * wI), z = Math.round(bz + qw * wI);
+      const foam = f > 44 || hash(x, y, z, 91) < 0.25;
+      set(x, y, z, foam ? FOAM : WATER);
+    }
+  }
+  /* splash where it vanishes below */
+  const sx2 = Math.round(FALLX + ux * Math.sqrt(58) * 0.9);
+  const sz2 = Math.round(FALLZ + uz * Math.sqrt(58) * 0.9);
+  for (let k = 0; k < 26; k++) {
+    const an = rnd() * Math.PI * 2, rr2 = rnd() * 2.6;
+    set(sx2 + Math.round(Math.cos(an) * rr2), 2 + Math.floor(rnd() * 3),
+        sz2 + Math.round(Math.sin(an) * rr2), rnd() < 0.5 ? FOAM : WATER);
+  }
+}
+/* ════════════════════════════════════════════════════════════════════
+   03_buildings.js — architecture kit
+   hall(), roundTower(), squareTower(), bridge(), stairPath()
+   All centres/sizes in voxel coordinates; angles in degrees.
+   ════════════════════════════════════════════════════════════════════ */
+
+function lampPost(x, z, y) {                 /* y = ground-level top voxel */
+  set(x, y + 1, z, IRON); set(x, y + 2, z, IRON); set(x, y + 3, z, LANT);
+}
+
+function fountain(x, z, y) {
+  fillDisk(x, z, y + 1, 3.5, STONE2);
+  for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++)
+    if (dx * dx + dz * dz <= 6.5) set(x + dx, y + 1, z + dz, WATER);
+  set(x, y + 2, z, STONE3); set(x, y + 3, z, STONE3); set(x, y + 4, z, LANT);
+}
+
+function lanternWire(x, z, y) { set(x, y + 1, z, IRON); set(x, y + 2, z, LANT); }
+
+/* ── rectangular building ─────────────────────────────────────────── */
+function hall(o) {
+  const hl = o.hl, hw = o.hw, cx = o.cx, cz = o.cz, ang = (o.ang ?? 0) * DR;
+  const ca = Math.cos(ang), sa = Math.sin(ang);
+  const y0 = o.y0 ?? PLAT_Y, h = o.h ?? 8, floorH = o.floorH ?? 6;
+  const roof = o.roof ?? 'gable', roofH = o.roofH ?? Math.max(2, Math.round(hw + 2));
+  const stone = o.stone ?? STONE, trim = o.trim ?? STONE3;
+  const win = o.win ?? 'normal', ev = o.ev ?? 3, litP = o.litP ?? 0.5, litM = o.winMat ?? WIN;
+  const y1 = y0 + h - 1;
+  const diag = Math.ceil(Math.hypot(hl, hw)) + 2;
+  const W2 = (u, v) => [cx + u * ca - v * sa, cz + u * sa + v * ca];
+
+  /* body + foundation + perimeter detail */
+  for (let zz = -diag; zz <= diag; zz++) for (let xx = -diag; xx <= diag; xx++) {
+    const x = Math.round(cx + xx), z = Math.round(cz + zz);
+    if (x < 0 || x >= W || z < 0 || z >= D) continue;
+    const rx = x - cx, rz = z - cz;
+    const u = rx * ca + rz * sa, v = -rx * sa + rz * ca;
+    if (u < -hl - 0.49 || u > hl + 0.49 || v < -hw - 0.49 || v > hw + 0.49) continue;
+    const edge = Math.abs(u) > hl - 0.52 || Math.abs(v) > hw - 0.52;
+    const onSide = Math.abs(v) > hw - 0.52, onEnd = Math.abs(u) > hl - 0.52;
+    const corner = Math.abs(u) > hl - 1.49 && Math.abs(v) > hw - 1.49;
+    const ui = Math.round(u), vi = Math.round(v);
+
+    for (let y = y0; y <= y1; y++) {
+      let m = stone; const yy = y - y0;
+      if (edge) {
+        if (yy < 2) m = STONE2;
+        else if (corner) m = ((yy >> 1) & 1) ? STONE2 : STONE3;
+        else if (yy % floorH === 0) m = STONE2;
+      }
+      set(x, y, z, m);
+    }
+    for (let y = y0 - 1; y > y0 - 72; y--) { if (get(x, y, z)) break; set(x, y, z, STONE2); }
+
+    /* windows on the perimeter ring */
+    if (edge && (win === 'normal' || win === 'gothic') && !corner) {
+      if ((onSide && Math.abs(ui) > 1.9 && Math.abs(ui) <= hl - 1.9 && ((ui % ev) + ev * 20) % ev === 0) ||
+          (onEnd && hl >= 5 && Math.abs(vi) > 1.9 && Math.abs(vi) <= hw - 1.9 && ((vi % ev) + ev * 20) % ev === 0)) {
+        for (let fi = 0; fi <= Math.floor(h / floorH); fi++) {
+          const yw = y0 + fi * floorH;
+          if (o.arches && yw < y0 + 6) continue;        /* arcade owns ground floor */
+          if (win === 'normal') {
+            set(x, yw + 1, z, trim);                    /* sill */
+            for (let k = 2; k <= 3; k++) {
+              const y = yw + k;
+              if (y >= y0 + 3 && y <= y1 - 1)
+                set(x, y, z, hash(x, y, z, 3) < litP * 0.72 ? litM : WINDK);
+            }
+          } else if (yw + 7 <= y1) {                    /* gothic lancets */
+            for (let k = 1; k <= 6; k++)
+              set(x, yw + k, z, hash(x, yw + k, z, 3) < litP * 0.72 ? litM : WINDK);
+            set(x, yw + 7, z, trim);                    /* transom */
+          }
+        }
+      }
+    }
+    /* open ground-floor arcade */
+    if (o.arches && onSide && !corner && Math.abs(ui) > 1.9 && Math.abs(ui) <= hl - 2.9 &&
+        ((ui % 2) + 2) % 2 === 1)
+      for (let y = y0 + 2; y <= Math.min(y0 + 5, y1 - 2); y++) set(x, y, z, 0);
+  }
+
+  /* buttresses on the long walls */
+  if (o.buttress) for (const side of [1, -1]) for (let ui = -Math.round(hl) + 1; ui <= hl - 1; ui++) {
+    if ((ui % o.buttress + o.buttress) % o.buttress !== 0 || Math.abs(ui) >= hl - 2) continue;
+    const [bx, bz] = W2(ui, side * (hw + 1));
+    const xi = Math.round(bx), zi = Math.round(bz);
+    if (xi < 0 || xi >= W || zi < 0 || zi >= D) continue;
+    for (let y = y0; y <= y1; y++) set(xi, y, zi, y === y1 ? trim : stone);
+    for (let y = y0 - 1; y > y0 - 60; y--) { if (get(xi, y, zi)) break; set(xi, y, zi, STONE2); }
+  }
+
+  /* roofs */
+  if (roof === 'gable' || roof === 'hip') {
+    const hip = roof === 'hip';
+    const rad = Math.ceil(Math.hypot(hl, hw)) + 2;
+    for (let k = 0; k < roofH; k++) {
+      const y = y1 + 1 + k, fV = 1 - k / roofH;
+      const limV = (hw + 1) * fV + 0.45, limU = (hl + 1) * fV + 0.45;
+      for (let zz = -rad; zz <= rad; zz++) for (let xx = -rad; xx <= rad; xx++) {
+        const x = Math.round(cx + xx), z = Math.round(cz + zz);
+        if (x < 0 || x >= W || z < 0 || z >= D) continue;
+        const rx = x - cx, rz = z - cz;
+        const u = rx * ca + rz * sa, v = -rx * sa + rz * ca;
+        const withinV = Math.abs(v) <= limV + 0.55;
+        const withinU = hip ? Math.abs(u) <= limU + 0.55 : Math.abs(u) <= hl + 0.75;
+        if (!withinV || !withinU) continue;
+        const inV = Math.abs(v) <= limV, inU = hip ? Math.abs(u) <= limU : Math.abs(u) <= hl + 0.45;
+        if (inV && inU) {
+          let m = ROOF;
+          if (k === 0 || k >= roofH - 1) m = ROOF2;     /* eaves & ridge */
+          if (Math.abs(v) > limV - 1.25) m = ROOF2;
+          if (hip && Math.abs(u) > limU - 1.25) m = ROOF2;
+          set(x, y, z, m);
+        } else if (!hip && Math.abs(u) > hl - 0.62 && Math.abs(v) <= hw * fV + 0.45) {
+          set(x, y, z, stone);                          /* gable end wall */
+        }
+      }
+      /* dormers riding the gable slope */
+      if (!hip && o.dormers && (k === 2 || k === 3) && limV >= 0.9) {
+        for (let ui = -Math.round(hl) + 2; ui <= hl - 2; ui += 4)
+          for (const side of [1, -1]) {
+            const [dx2, dz2] = W2(ui, side * limV);
+            const xi = Math.round(dx2), zi = Math.round(dz2);
+            if (hash(xi, zi, k, 23) < 0.55) {
+              set(xi, y, zi, hash(xi, k, zi, 24) < 0.8 ? WIN : WINDK);
+              set(xi, y + 1, zi, ROOF2);
+            }
+          }
+      }
+    }
+    /* small lit round window in the gable ends */
+    if (o.gableWin) {
+      const gy = y1 + Math.max(2, Math.round(roofH * 0.35));
+      if (gy <= y1 + roofH - 2) for (const end of [1, -1]) {
+        const gx = Math.round(W2(end * hl, 0)[0]), gz = Math.round(W2(end * hl, 0)[1]);
+        set(gx, gy, gz, hash(gx, gy, gz, 25) < 0.8 ? WIN : WINDK);
+      }
+    }
+    /* copper flèche on the ridge */
+    if (o.fleche) {
+      const ry = y1 + roofH, fx = Math.round(cx), fz = Math.round(cz);
+      for (let k = 0; k < 4; k++) set(fx, ry + k, fz, k >= 2 ? COPPER : STONE3);
+      set(fx, ry + 4, fz, GOLD);
+    }
+    /* corner pinnacles at both gable ends */
+    if (o.pinn) for (const eu of [1, -1]) for (const evv of [1, -1]) {
+      const [px, pz] = W2(eu * hl, evv * hw);
+      const xi = Math.round(px), zi = Math.round(pz);
+      for (let k = 0; k < o.pinn; k++)
+        set(xi, y1 + 1 + k, zi, k >= o.pinn - 2 ? COPPER : (k >= o.pinn - 4 ? STONE3 : STONE2));
+    }
+  } else if (roof === 'flat') {                          /* battlements */
+    const rr2 = o.machi ? 1.45 : 0;
+    for (let zz = -diag; zz <= diag; zz++) for (let xx = -diag; xx <= diag; xx++) {
+      const x = Math.round(cx + xx), z = Math.round(cz + zz);
+      if (x < 0 || x >= W || z < 0 || z >= D) continue;
+      const rx = x - cx, rz = z - cz;
+      const u = rx * ca + rz * sa, v = -rx * sa + rz * ca;
+      if (Math.abs(u) > hl + rr2 + 0.49 || Math.abs(v) > hw + rr2 + 0.49) continue;
+      if (o.machi) {
+        if (Math.abs(u) > hl - 0.52 || Math.abs(v) > hw - 0.52) {
+          set(x, y1 + 1, z, STONE2);
+          if (((Math.round(u) + Math.round(v)) & 1) === 0) set(x, y1 + 2, z, STONE3);
+        }
+      } else if (o.crenel && ((Math.round(u) + Math.round(v)) & 1) === 0)
+        set(x, y1 + 1, z, STONE3);
+    }
+  }
+}
+
+/* ── round tower ──────────────────────────────────────────────────── */
+function roundTower(o) {
+  const ox = o.x, oz = o.z, r = o.r, y0 = o.y0 ?? PLAT_Y, h = o.h ?? 12;
+  const cone = o.cone ?? 0, coneH = o.coneH ?? (cone ? Math.round(2.8 * r + 3) : 0);
+  const crenel = !!o.crenel, machi = !!o.machi, spire = o.spire ?? 0;
+  const winN = o.winN ?? Math.round(1.4 * r), litP = o.litP ?? 0.5, dark = !!o.dark;
+  const stone = o.stone ?? STONE, y1 = y0 + h - 1;
+  const rr = r + 0.45, bx = Math.round(ox), bz2 = Math.round(oz);
+
+  for (let z = Math.floor(oz - r - 2); z <= Math.ceil(oz + r + 2); z++)
+    for (let x = Math.floor(ox - r - 2); x <= Math.ceil(ox + r + 2); x++) {
+      if (x < 0 || x >= W || z < 0 || z >= D) continue;
+      const dx = x - ox, dz = z - oz, dd = dx * dx + dz * dz;
+      if (dd <= rr * rr) {
+        for (let y = y0; y <= y1; y++) set(x, y, z, y < y0 + 2 ? STONE2 : stone);
+        for (let y = y0 - 1; y > y0 - 72; y--) { if (get(x, y, z)) break; set(x, y, z, STONE2); }
+        if (machi && dd <= (r + 1.45) * (r + 1.45) && dd > (r - 1) * (r - 1)) {
+          set(x, y1 - 1, z, STONE2); set(x, y1, z, STONE2);
+        }
+        if (crenel && dd <= (r + 0.55) * (r + 0.55) && ((x ^ z) & 1) === 0)
+          set(x, y1 + (machi ? 2 : 1), z, STONE3);
+      }
+    }
+  /* slit windows by angle segments */
+  for (let wi = 0; wi < winN; wi++) {
+    const th = (wi + 0.5) * Math.PI * 2 / winN;
+    const wx = Math.round(ox + Math.cos(th) * (r + 0.2));
+    const wz = Math.round(oz + Math.sin(th) * (r + 0.2));
+    for (let fy = y0 + 3; fy + 1 <= y1 - 1; fy += 7)
+      for (let k = 0; k < 2; k++)
+        set(wx, fy + k, wz, dark ? WINDK : (hash(wx, fy + k, wz, 13) < litP * 0.72 ? WIN : WINDK));
+  }
+  /* stepped cone roof */
+  if (cone) {
+    const R0 = r + (crenel ? -0.6 : 1.2);
+    for (let k = 0; k < coneH; k++) {
+      const y = y1 + 1 + k, rad = R0 * Math.pow(1 - k / coneH, 1.08);
+      if (rad < 0.4) break;
+      const ri = Math.ceil(rad);
+      for (let dz = -ri; dz <= ri; dz++) for (let dx = -ri; dx <= ri; dx++) {
+        const dd = Math.hypot(dx, dz);
+        if (dd <= rad + 0.3)
+          set(bx + dx, y, bz2 + dz, (k === 0 || dd > rad - 1.15) ? ROOF2 : ROOF);
+      }
+      if (k % 6 === 2 && !dark) for (let dI = 0; dI < 8; dI++) {
+        const th = dI * Math.PI / 4 + k * 0.3;
+        const dx2 = Math.round(ox + Math.cos(th) * rad * 0.75);
+        const dz2 = Math.round(oz + Math.sin(th) * rad * 0.75);
+        if (hash(dx2, dz2, k, 33) < 0.5) { set(dx2, y, dz2, WIN); set(dx2, y + 1, dz2, ROOF2); }
+      }
+    }
+    if (spire) for (let k = 0; k < spire; k++)
+      set(bx, y1 + coneH + k, bz2, k >= spire - 2 ? COPPER : STONE3);
+  }
+}
+
+/* ── square tower: hall + hip roof + optional corner pinnacles ────── */
+function squareTower(o) {
+  const s = o.s ?? 3;
+  hall({
+    cx: o.cx, cz: o.cz, ang: o.ang ?? 0, hl: s, hw: s, y0: o.y0, h: o.h,
+    roof: 'hip', roofH: o.roofH ?? Math.round(2.6 * s + 4), win: o.win ?? 'normal',
+    ev: o.ev ?? 3, crenel: o.crenel, machi: o.machi, buttress: o.buttress,
+    litP: o.litP, floorH: o.floorH ?? 9
+  });
+  if (o.pinn) for (const [su, sv] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+    const [px, pz] = toWorld2(o.cx, o.cz, o.ang ?? 0, su * s, sv * s);
+    const xi = Math.round(px), zi = Math.round(pz), yT = (o.y0 ?? PLAT_Y) + o.h;
+    for (let k = 0; k < o.pinn; k++)
+      set(xi, yT + k, zi, k >= o.pinn - 2 ? COPPER : (k < 2 ? STONE3 : STONE2));
+  }
+}
+
+/* ── bridges ──────────────────────────────────────────────────────── */
+function bridge(o) {
+  const x0 = o.x0, z0 = o.z0, x1 = o.x1, z1 = o.z1, y = o.y ?? PLAT_Y;
+  const wood = !!o.wood, truss = !!o.truss, cover = !!o.cover;
+  const deckM = wood ? WOOD2 : STONE3, railM = wood ? WOOD : STONE2;
+  const dx = x1 - x0, dz = z1 - z0, n = Math.max(1, Math.ceil(Math.hypot(dx, dz)));
+  const ux = dx / n, uz = dz / n, pwx = -uz, pwz = ux;
+  for (let i = 0; i <= n; i++) {
+    const bx = x0 + ux * i, bz = z0 + uz * i, xi = Math.round(bx), zi = Math.round(bz);
+    for (let j = -1; j <= 1; j++) {
+      set(Math.round(bx + pwx * j), y, Math.round(bz + pwz * j), deckM);
+      if (j !== 0 && i % 8 !== 2)
+        set(Math.round(bx + pwx * j), y + 1, Math.round(bz + pwz * j), railM);
+    }
+    /* lantern posts */
+    if (o.lantEvery && i % o.lantEvery === 2) {
+      const lx = Math.round(bx + pwx * 1.5), lz = Math.round(bz + pwz * 1.5);
+      set(lx, y + 2, lz, IRON); set(lx, y + 3, lz, LANT);
+    }
+    /* stone piers every pierEvery + shallow arch masonry */
+    if (!wood && o.pierEvery) {
+      if (i % o.pierEvery === 0)
+        for (const j of [-1, 0, 1])
+          dropFill(Math.round(bx + pwx * j), Math.round(bz + pwz * j), y - 1, STONE2, 90);
+      set(xi, y - 1, zi, STONE2);                            /* spandrel band */
+      if (i % o.pierEvery === 1) set(xi, y - 2, zi, STONE2); /* arch curve */
+    }
+    /* wooden trestle posts + diagonal lattice */
+    if (wood && truss && i % 3 === 0)
+      for (const j of [-1, 1])
+        dropFill(Math.round(bx + pwx * j), Math.round(bz + pwz * j), y - 1, WOOD, 60);
+    if (wood && truss && i % 6 === 3)
+      for (const j of [-1, 1]) {
+        const ax = bx + pwx * j - ux * 3, az = bz + pwz * j - uz * 3;
+        lineV(Math.round(ax), y - 1, Math.round(az), xi, y - 3, zi, WOOD, 0);
+      }
+    /* covered gable roof */
+    if (cover) {
+      for (let j = -1; j <= 1; j++) set(Math.round(bx + pwx * j), y + 2, Math.round(bz + pwz * j), ROOF2);
+      set(xi, y + 3, zi, ROOF2);
+    }
+  }
+}
+
+/* ── lantern stairway following a plan-pixel polyline ─────────────── */
+function stairPath(pts, yA, yB, w = 3, lantEvery = 5) {
+  const P = pts.map(p => [PF(p[0]), QZ(p[1])]);
+  let total = 0;
+  for (let s = 0; s < P.length - 1; s++)
+    total += Math.hypot(P[s + 1][0] - P[s][0], P[s + 1][1] - P[s][1]);
+  if (total < 1) return;
+  let acc = 0, step = 0;
+  for (let s = 0; s < P.length - 1; s++) {
+    const xa = P[s][0], za = P[s][1], xb = P[s + 1][0], zb = P[s + 1][1];
+    const segLen = Math.hypot(xb - xa, zb - za), nSeg = Math.max(1, Math.ceil(segLen));
+    const dxu = (xb - xa) / segLen, dzu = (zb - za) / segLen;
+    const px2 = -dzu, pz2 = dxu;
+    for (let i = s === 0 ? 0 : 1; i <= nSeg; i++) {
+      const bx = lerp(xa, xb, i / nSeg), bz = lerp(za, zb, i / nSeg);
+      const y = Math.round(lerp(yA, yB, clamp(acc / total, 0, 1)));
+      acc += segLen / nSeg; step++;
+      /* deck */
+      for (let j = -1; j <= 1; j++)
+        set(Math.round(bx + px2 * j), y, Math.round(bz + pz2 * j),
+            (step + 10) % 5 === 0 ? STONE2 : STONE3);
+      /* side parapets */
+      for (const j of [-2, 2]) {
+        const xi = Math.round(bx + px2 * j), zi = Math.round(bz + pz2 * j);
+        set(xi, y, zi, STONE2);
+        set(xi, y + 1, zi, (step + (j > 0 ? 0 : 1)) % 2 === 0 ? STONE3 : STONE2);
+      }
+      /* 5-voxel headroom carve */
+      for (let j = -1; j <= 1; j++)
+        for (let k = 1; k <= 5; k++) {
+          const xi = Math.round(bx + px2 * j), zi = Math.round(bz + pz2 * j);
+          if (surfY(xi, zi) > y + k) set(xi, y + k, zi, 0);
+        }
+      /* pier supports down to ground / lake bed */
+      if (step % 3 === 0)
+        for (const j of [-1, 1])
+          dropFill(Math.round(bx + px2 * j), Math.round(bz + pz2 * j), y - 1, STONE2, 90, true);
+      /* lantern posts */
+      if (step % lantEvery === 0) {
+        const xi = Math.round(bx + px2 * 2), zi = Math.round(bz + pz2 * 2);
+        set(xi, y + 2, zi, IRON); set(xi, y + 3, zi, LANT);
+      }
+    }
+  }
+}
+/* ════════════════════════════════════════════════════════════════════
+   04_castle.js — the Hogwarts layout, every building from the plan
+   Plan-pixel coordinates are converted inside via PX()/PZ(); heights in voxels.
+   ════════════════════════════════════════════════════════════════════ */
+
+const addLight = (x, y, z, s = 1) => POINTS.push({ x, y, z, s });
+
+/* gravel/path stroke across terrain tops */
+function pathLine(xa, za, xb, zb, m = GRAVEL) {
+  const n = Math.max(1, Math.round(Math.hypot(xb - xa, zb - za)));
+  for (let i = 0; i <= n; i++) {
+    const x = Math.round(lerp(xa, xb, i / n)), z = Math.round(lerp(za, zb, i / n));
+    const t = surfY(x, z);
+    if (t > LAKE_Y + 1 && KIND[get(x, t, z)] === 1 && KIND[get(x, t, z)] !== KIND.WINDK)
+      set(x, t, z, m);
+  }
+}
+
+/* crenellated wall following the terrain along plan-px vertices */
+function crenelWall(pts, h, turret = 0) {
+  const P = pts.map(p => [PF(p[0]), QZ(p[1])]);
+  for (let s = 0; s < P.length - 1; s++) {
+    const xa = P[s][0], za = P[s][1], xb = P[s + 1][0], zb = P[s + 1][1];
+    const n = Math.max(1, Math.round(Math.hypot(xb - xa, zb - za)));
+    for (let i = 0; i <= n; i++) {
+      const x = Math.round(lerp(xa, xb, i / n)), z = Math.round(lerp(za, zb, i / n));
+      const t = surfY(x, z);
+      if (t <= LAKE_Y) continue;
+      for (let k = 1; k <= h; k++) set(x, t + k, z, k < 3 ? STONE2 : STONE);
+      if (((x + z) & 1) === 0) set(x, t + h + 1, z, STONE3);
+    }
+  }
+  if (turret) for (const [px, pz] of pts) {
+    const x = PX(px), z = PZ(pz), t = surfY(x, z);
+    if (t > LAKE_Y) roundTower({ x, z, r: turret, y0: t + 1, h: 12, crenel: true, litP: 0.2 });
+  }
+}
+
+/* paved rectangle / oriented terrace over the terrain top */
+function paveRect(px0, pz0, px1, pz1) {
+  for (let z = PZ(pz0); z <= PZ(pz1); z++) for (let x = PX(px0); x <= PX(px1); x++) {
+    const t = surfY(x, z);
+    if (t > LAKE_Y + 1 && KIND[get(x, t, z)] < 3) set(x, t, z, hash(x, 0, z, 43) < 0.62 ? STONE3 : PATH);
+  }
+}
+function paveRing(cx, cz, ang, hl, hw) {   /* 2-voxel terrace around a hall */
+  oriented2D(cx, cz, ang, hl + 1, hw + 1, (u, v, x, z) => {
+    if (Math.abs(u) <= hl && Math.abs(v) <= hw) return;
+    const t = surfY(x, z);
+    if (t > PLAT_Y - 30) set(x, t, z, hash(x, 0, z, 43) < 0.62 ? STONE3 : PATH);
+  });
+}
+
+/* glass greenhouse from a plan-px rect: 3-high glazed walls, stepped glass roof */
+function greenhouse(px0, pz0, px1, pz1) {
+  const x0 = PX(px0), z0 = PZ(pz0), x1 = PX(px1), z1 = PZ(pz1);
+  const ys = PLAT_Y;
+  const spanX = x1 - x0, spanZ = z1 - z0;
+  for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) {
+    const ed = x === x0 || x === x1 || z === z0 || z === z1;
+    if (ed) {
+      for (let y = ys; y < ys + 3; y++) set(x, y, z, ((x + z) % 4 === 0) ? IRON : GLASS);
+      for (let y = ys - 1; y > ys - 40; y--) { if (get(x, y, z)) break; set(x, y, z, STONE2); }
+    } else if ((x + z) % 6 === 0) set(x, ys, z, PLANT);
+    /* stepped glass roof, ridge across the SHORT axis */
+    const level = spanX >= spanZ ? Math.min(z - z0, z1 - z) : Math.min(x - x0, x1 - x);
+    const ry = ys + 3 + (level >= 1 ? 1 : 0);
+    set(x, ry, z, ed ? (((x + z) % 4 === 1) ? IRON : ROOF2)
+                     : (((x + z) % 4 === 0) ? IRON : GLASS));
+    /* second ridge step on wide houses */
+    if (level >= 2) set(x, ry + 1, z, ((x % 4 === 2) ? IRON : GLASS));
+  }
+  set(x0 + 1, ys + 2, z0 + 1, LANT);
+}
+
+function pavilion(x, z) {
+  const y0 = PLAT_Y;
+  for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) {
+    const mx = Math.max(Math.abs(dx), Math.abs(dz)), sm = Math.abs(dx) + Math.abs(dz);
+    if (mx <= 3 && sm <= 5) {
+      if (mx === 3 || sm === 5) {
+        for (let y = y0; y < y0 + 4; y++) set(x + dx, y, z + dz, ((dx + dz) % 3 === 0) ? IRON : GLASS);
+        for (let y = y0 - 1; y > y0 - 30; y--) { if (get(x + dx, y, z + dz)) break; set(x + dx, y, z + dz, STONE2); }
+      }
+    } else if (mx <= 4 && sm <= 7) {
+      set(x + dx, y0 + 4, z + dz, GLASS);                    /* eave ring */
+    }
+  }
+  for (let k = 0; k < 4; k++) {
+    const r4 = 3.4 - k * 0.9;
+    for (let dz = -4; dz <= 4; dz++) for (let dx = -4; dx <= 4; dx++)
+      if (Math.hypot(dx, dz) <= r4) set(x + dx, y0 + 5 + k, z + dz, GLASS);
+  }
+  set(x, y0 + 9, z, GOLD); set(x, y0 + 10, z, LANT);
+}
+
+function cloister() {
+  /* ring corridor (1032,682)-(1270,910) around lawn (1060,700)-(1240,880) */
+  const X0 = PX(1032), X1 = PX(1270), Z0 = PZ(682), Z1 = PZ(910);
+  const LX0 = PX(1060), LX1 = PX(1240), LZ0 = PZ(700), LZ1 = PZ(880);
+  for (let z = Z0; z <= Z1; z++) for (let x = X0; x <= X1; x++) {
+    const inner = x > LX0 && x < LX1 && z > LZ0 && z < LZ1;
+    if (inner) {                                     /* lawn keeps grass */
+      if ((x + z) % 37 === 0) set(x, 99, z, MOSS);
+      continue;
+    }
+    set(x, 99, z, hash(x, 0, z, 43) < 0.7 ? STONE3 : PATH);          /* paving */
+    if ((x === LX0 || x === LX1 || z === LZ0 || z === LZ1) &&
+        ((z === LZ0 || z === LZ1) ? x % 3 === 1 : z % 3 === 1)) {      /* pillars */
+      for (let y = 100; y <= 104; y++) set(x, y, z, y === 104 ? STONE2 : STONE3);
+    }
+    set(x, 105, z, (x === X0 || x === X1 || z === Z0 || z === Z1) ? ROOF2 : ROOF2);
+  }
+}
+
+/* covered stone gallery across terrain (used for short passages) */
+function stonePassage(px0, pz0, px1, pz1) {
+  bridge({ x0: PX(px0), z0: PZ(pz0), x1: PX(px1), z1: PZ(pz1), y: PLAT_Y, w: 3, cover: true });
+}
+
+function clockFace(x, yMid, zMid, xSign) {
+  for (let dz = -1; dz <= 1; dz++) for (let dy = -1; dy <= 1; dy++) {
+    const rim = Math.abs(dz) === 1 || Math.abs(dy) === 1;
+    set(x + xSign * 1, yMid + dy, zMid + dz, rim ? GOLD : CLOCK);
+  }
+  set(x + xSign * 1, yMid, zMid + 1, BLACK);      /* hour hand   */
+  set(x + xSign * 1, yMid + 1, zMid, BLACK);      /* minute hand */
+}
+
+function buildCastle() {
+  const yP = PLAT_Y - 1;                          /* plateau top voxel */
+
+  /* ── Greenhouse compound (NE) ── */
+  pathLine(PX(1122), PZ(517), PX(1568), PZ(517));           /* between rows */
+  pathLine(PX(1122), PZ(917), PX(1568), PZ(917));
+  pathLine(PX(1347), PZ(438), PX(1347), PZ(1015));          /* between the two groups */
+  pathLine(PX(1125), PZ(445), PX(1575), PZ(445));           /* perimeter ring */
+  pathLine(PX(1126), PZ(1012), PX(1575), PZ(1012));
+  pathLine(PX(1128), PZ(447), PX(1128), PZ(1013));
+  greenhouse(1130, 470, 1300, 505); greenhouse(1130, 530, 1300, 560);
+  greenhouse(1395, 470, 1560, 505); greenhouse(1395, 530, 1560, 560);
+  greenhouse(1470, 580, 1510, 730); greenhouse(1525, 580, 1565, 730);
+  greenhouse(1470, 745, 1510, 890); greenhouse(1525, 745, 1565, 890);
+  pavilion(PX(1350), PZ(448));
+  crenelWall([[1120, 448], [1585, 448]], 4);
+  crenelWall([[1581, 452], [1581, 1018]], 4);
+
+  /* ── North quadrangle ── */
+  hall({ cx: PX(1117.5), cz: PZ(642.5), hl: 18.9, hw: 4.5, h: 24, roofH: 6, dormers: true });
+  hall({ cx: PX(995), cz: PZ(760), ang: 90, hl: 18.6, hw: 4.2, h: 24, roofH: 5 });
+  cloister();
+  fountain(PX(1150), PZ(790), yP);
+  lampPost(PX(1062), PZ(706), yP); lampPost(PX(1238), PZ(706), yP);
+  lampPost(PX(1062), PZ(874), yP); lampPost(PX(1238), PZ(874), yP);
+  addLight(PX(1150), yP + 5, PZ(790));
+
+  /* ── Spine & gothic towers ── */
+  hall({ cx: PX(1350), cz: PZ(750), ang: 90, hl: 19.2, hw: 9, h: 26, roofH: 11,
+         buttress: 4, dormers: true });
+  hall({ cx: PX(1350), cz: PZ(1027.5), ang: 90, hl: 14.5, hw: 5, h: 22, roofH: 6 });   /* nave continues S from the spine */
+  squareTower({ cx: PX(1280), cz: PZ(612), s: 4, h: 40, roofH: 24, win: 'gothic', pinn: 9, floorH: 9 });
+  squareTower({ cx: PX(1410), cz: PZ(612), s: 4, h: 40, roofH: 24, win: 'gothic', pinn: 9, floorH: 9 });
+  squareTower({ cx: PX(1345), cz: PZ(598), s: 3, h: 36, roofH: 34, win: 'gothic', floorH: 9 });
+  hall({ cx: PX(1360), cz: PZ(970), hl: 16.8, hw: 7.2, h: 24, roofH: 7, dormers: true });
+  squareTower({ cx: PX(1350), cz: PZ(958), s: 6, h: 34, roofH: 16, pinn: 9 });
+  hall({ cx: PX(1362.5), cz: PZ(1100), hl: 16.5, hw: 5.4, h: 22, buttress: 3, roofH: 6 });
+  roundTower({ x: PX(1215), z: PZ(1062), r: 3.6, h: 30, cone: 13 });
+  roundTower({ x: PX(1480), z: PZ(1062), r: 3.6, h: 30, cone: 13 });
+  roundTower({ x: PX(1215), z: PZ(1142), r: 4.3, h: 26, crenel: true });
+  roundTower({ x: PX(1480), z: PZ(1142), r: 4.3, h: 26, crenel: true });
+
+  /* fountain plaza */
+  paveRect(1095, 905, 1220, 1025);
+  fountain(PX(1157.5), PZ(965), yP);
+  lampPost(PX(1108), PZ(917), yP); lampPost(PX(1208), PZ(917), yP);
+  lampPost(PX(1108), PZ(1013), yP); lampPost(PX(1208), PZ(1013), yP);
+  addLight(PX(1157.5), yP + 5, PZ(965), 1.1);
+
+  /* ── West blocks ── */
+  hall({ cx: PX(1037.5), cz: PZ(972.5), ang: 90, hl: 6.9, hw: 4.5, h: 24, roofH: 6 });
+  hall({ cx: PX(945), cz: PZ(995), ang: 90, hl: 6.6, hw: 4.2, h: 20, roofH: 5 });
+  roundTower({ x: PX(945), z: PZ(1035), r: 6.6, h: 20, cone: 13, litP: 0.4 });
+  roundTower({ x: PX(897), z: PZ(960), r: 2.6, h: 27, cone: 10, litP: 0.3 });
+  roundTower({ x: PX(1000), z: PZ(953), r: 2.6, h: 29, cone: 10, litP: 0.3 });
+  roundTower({ x: PX(945), z: PZ(920), r: 2.8, h: 31, cone: 11, litP: 0.35 });
+  /* west stone bridge + gatehouse */
+  bridge({ x0: PX(885), z0: PZ(990), x1: PX(575), z1: PZ(968), y: PLAT_Y, pierEvery: 5, lantEvery: 5 });
+  roundTower({ x: PX(560), z: PZ(966), r: 3, h: 10, crenel: true, machi: true, litP: 0.5 });
+  addLight(PX(560), yP + 6, PZ(966), 0.8);
+
+  /* ── NW angled wing & grounds ── */
+  hall({ cx: PX(830), cz: PZ(605), ang: -22, hl: 11, hw: 7, h: 28, roofH: 9, dormers: true, buttress: 3 });
+  hall({ cx: PX(890), cz: PZ(700), ang: 19, hl: 12, hw: 3, h: 20, roofH: 5 });
+  roundTower({ x: PX(848), z: PZ(745), r: 2.8, h: 26, cone: 11, litP: 0.4 });
+  roundTower({ x: PX(922), z: PZ(770), r: 2.6, h: 24, cone: 10, litP: 0.4 });
+  squareTower({ cx: PX(735), cz: PZ(575), ang: -22, s: 3, h: 36, roofH: 22, win: 'gothic', floorH: 9 });
+  hall({ cx: PX(1100), cz: PZ(420), ang: -25, hl: 7, hw: 4, h: 14, roofH: 4, arches: true });
+  roundTower({ x: PX(1155), z: PZ(405), r: 2.4, h: 20, cone: 9, litP: 0.25 });
+  /* covered passage h12 from the connector to the spine (1080,465)-(1122,605) */
+  hall({ cx: PF(1101), cz: QZ(535), ang: 90, hl: 8.4, hw: 2.5, h: 12, roofH: 3, arches: true, win: 'none' });
+  /* rampart + owlery */
+  crenelWall([[1090, 380], [990, 190], [945, 165], [885, 140], [670, 150], [535, 345], [505, 405]], 6, 2.6);
+  roundTower({ x: PX(505), z: PZ(405), r: 4.5, h: 30, cone: 14, dark: true, winN: 11 });
+
+  /* ── Courtyard block, Clock Tower & Astronomy Tower ── */
+  hall({ cx: PX(920), cz: PZ(1222.5), hl: 16.8, hw: 5.1, h: 26, buttress: 3, roofH: 7 });
+  hall({ cx: PX(820), cz: PZ(1340), ang: 90, hl: 19.2, hw: 4.8, h: 26, roofH: 6 });
+  hall({ cx: PX(910), cz: PZ(1460), hl: 15.6, hw: 4.8, h: 24, arches: true, roofH: 5 });
+  hall({ cx: PX(1080), cz: PZ(1327.5), ang: 90, hl: 11.1, hw: 4.8, h: 26, roofH: 6 });
+  paveRect(866, 1268, 1034, 1416);
+  fountain(PX(950), PZ(1340), yP);
+  lampPost(PX(872), PZ(1274), yP); lampPost(PX(1030), PZ(1274), yP);
+  lampPost(PX(872), PZ(1410), yP); lampPost(PX(1030), PZ(1410), yP);
+  addLight(PX(950), yP + 5, PZ(1340), 1.1);
+  roundTower({ x: PX(775), z: PZ(1182), r: 5, h: 32, cone: 14, litP: 0.5 });
+  roundTower({ x: PX(775), z: PZ(1495), r: 5, h: 30, cone: 13, litP: 0.5 });
+  roundTower({ x: PX(1105), z: PZ(1235), r: 5.4, h: 34, cone: 15, litP: 0.5 });
+  roundTower({ x: PX(1000), z: PZ(1168), r: 2.4, h: 18, cone: 8 });
+  roundTower({ x: PX(1065), z: PZ(1168), r: 2.4, h: 18, cone: 8 });
+  roundTower({ x: PX(1060), z: PZ(1545), r: 2.6, h: 20, cone: 9 });
+  /* Clock Tower */
+  squareTower({ cx: PX(795), cz: PZ(1340), s: 5, h: 44, roofH: 18, pinn: 9, floorH: 9 });
+  clockFace(PX(795), PLAT_Y + 36, PZ(1340), -1);
+  clockFace(PX(795), PLAT_Y + 36, PZ(1340), +1);
+  addLight(PX(795), PLAT_Y + 40, PZ(1340), 0.7);
+  /* Astronomy Tower — tallest point ≈ y 192 */
+  roundTower({ x: PX(1100), z: PZ(1490), r: 10, h: 44, cone: 42, spire: 5, crenel: true, machi: true, litP: 0.35 });
+  roundTower({ x: PX(1100) - 7, z: PZ(1490) - 5, r: 2, y0: PLAT_Y + 62, h: 14, cone: 6, litP: 0.3 });
+  roundTower({ x: PX(1100) - 4, z: PZ(1490) - 8, r: 1.8, y0: PLAT_Y + 66, h: 11, cone: 5, litP: 0.3 });
+  addLight(PX(1100), PLAT_Y + 50, PZ(1490), 1.3);
+
+  /* ── Clock-tower courtyard (W) & covered wooden bridge ── */
+  hall({ cx: PX(647.5), cz: PZ(1337.5), ang: 90, hl: 9.9, hw: 6.3, h: 22, roofH: 6, dormers: true });
+  crenelWall([[425, 1262], [700, 1258]], 10);
+  crenelWall([[425, 1412], [700, 1416]], 10);
+  crenelWall([[425, 1262], [425, 1412]], 12);
+  roundTower({ x: PX(425), z: PZ(1262), r: 2.6, h: 14, cone: 8, litP: 0.25 });
+  roundTower({ x: PX(425), z: PZ(1412), r: 2.6, h: 14, cone: 8, litP: 0.25 });
+  paveRect(430, 1268, 692, 1408);
+  fountain(PX(525), PZ(1338), yP);
+  addLight(PX(525), yP + 5, PZ(1338), 0.9);
+  /* gate arch through the west curtain */
+  for (let z = PZ(1332); z <= PZ(1348); z++)
+    for (let y = PLAT_Y; y <= PLAT_Y + 8; y++) set(PX(425), y, z, 0);
+  for (let z = PZ(1332); z <= PZ(1348); z++) set(PX(425), PLAT_Y + 9, z, STONE2);
+  stonePassage(700, 1340, 782, 1340);
+  bridge({ x0: PX(422), z0: PZ(1340), x1: PX(232), z1: PZ(1340), y: PLAT_Y, wood: true, truss: true, cover: true });
+  roundTower({ x: PX(232), z: PZ(1340), r: 3, h: 10, crenel: true, litP: 0.45 });
+  addLight(PX(422), yP + 4, PZ(1340), 0.7);
+  /* paths from the bridge westwards */
+  pathLine(PX(232), PZ(1340), PX(150), PZ(1500), GRAVEL);
+
+  /* ── Great Hall ── */
+  const GHX = PX(1125), GHZ = PZ(1655);
+  paveRing(GHX, GHZ, -34.9, 24, 5);
+  hall({ cx: GHX, cz: GHZ, ang: -34.9, hl: 24, hw: 5, h: 28, roofH: 10,
+         win: 'gothic', winMat: WIN2, litP: 0.9, buttress: 3, floorH: 9, gableWin: true });
+  {
+    const [stx, stz] = toWorld2(GHX, GHZ, -34.9, 8, 7);
+    roundTower({ x: stx, z: stz, r: 3, h: 34, cone: 11, litP: 0.5 });
+  }
+  {
+    /* copper flèche midway on the ridge */
+    const [fx, fz] = toWorld2(GHX, GHZ, -34.9, 0, 0);
+    const ry = PLAT_Y + 28 + 10;
+    for (let k = 0; k < 4; k++) set(Math.round(fx), ry + k, Math.round(fz), k >= 2 ? COPPER : STONE3);
+    set(Math.round(fx), ry + 4, Math.round(fz), GOLD);
+  }
+  addLight(GHX, PLAT_Y + 8, GHZ, 1.2);
+
+  /* ── Bridges & stairs ── */
+  bridge({ x0: PX(1340), z0: PZ(1170), x1: PX(1250), z1: PZ(1465), y: PLAT_Y, pierEvery: 6, lantEvery: 4 });
+  bridge({ x0: PX(1145), z0: PZ(1215), x1: PX(1205), z1: PZ(1160), y: PLAT_Y + 12, cover: true, pierEvery: 4 });
+  stairPath([[1330, 1590], [1370, 1690], [1470, 1700], [1500, 1630], [1600, 1600], [1690, 1600], [1760, 1650]],
+            PLAT_Y, LAKE_Y + 2, 3, 5);
+  addLight(PF(1500), QZ(1640), PLAT_Y - 20, 0.7);
+
+  /* ── Boathouse ── */
+  hall({ cx: PF(1805), cz: QZ(1700), ang: 90, hl: 6, hw: 3, h: 8, y0: LAKE_Y + 3, roofH: 4, litP: 0.7 });
+  roundTower({ x: PF(1812), z: QZ(1693), r: 2.2, y0: LAKE_Y + 3, h: 10, cone: 7, litP: 0.6 });
+  bridge({ x0: PF(1801), z0: QZ(1708), x1: PF(1799), z1: QZ(1718), y: LAKE_Y + 1, wood: true, lantEvery: 6 });
+  bridge({ x0: PF(1809), z0: QZ(1708), x1: PF(1811), z1: QZ(1719), y: LAKE_Y + 1, wood: true, lantEvery: 6 });
+  addLight(PF(1805), LAKE_Y + 8, QZ(1700), 1.1);
+
+  addLight(30, 74, 160, 0.9);          /* stone circle glow */
+}
+/* ════════════════════════════════════════════════════════════════════
+   05_grounds.js — Quidditch pitch, Hagrid's hut, stone circle, willow,
+   forest, boats, squid, Hogwarts Express & Hogsmeade station
+   ════════════════════════════════════════════════════════════════════ */
+
+/* flat low eastern tier for the railway */
+function levelStationTier() {
+  for (let z = 58; z <= 132; z++) for (let x = 229; x <= 247; x++) {
+    let t = surfY(x, z);
+    if (t < LAKE_Y - 1) continue;                       /* leave water alone */
+    const watery = get(x, LAKE_Y, z) === WATER || get(x, LAKE_Y - 1, z) === WATER;
+    if (watery) continue;
+    while (t > 66) { set(x, t, z, 0); t--; }
+    while (t < 66) { t++; const m = t === 66 ? GRASS : (hash(x, t, z, 55) < 0.4 ? ROCK : DIRT); set(x, t, z, m); }
+    set(x, 66, z, hash(x, 0, z, 56) < 0.5 ? GRASS : GRASS2);
+  }
+}
+
+/* ── Quidditch pitch on the grounds tier ── */
+function quidditchPitch() {
+  const cx = PX(800), cz = PZ(330), y = surfY(cx, cz);
+  if (y <= LAKE_Y + 1) return;
+  const ang = -16 * DR, ca = Math.cos(ang), sa = Math.sin(ang);
+  const a = 24, b = 13;
+  const ev = (x, z) => {                                /* rotated ellipse norm */
+    const dx = x - cx, dz = z - cz;
+    const u = dx * ca + dz * sa, v = -dx * sa + dz * ca;
+    return (u / a) * (u / a) + (v / b) * (v / b);
+  };
+  const r = Math.ceil(a) + 2;
+  for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) {
+    const x = cx + dx, z = cz + dz, e = ev(x, z);
+    if (e > 1.55) continue;
+    const t = surfY(x, z);
+    if (e <= 1) {
+      const stripe = ((Math.round(-dx * sa + dz * ca) + 200) % 6 < 3);
+      set(x, t, z, stripe ? GRASS : MOSS);
+    } else if (e <= 1.14) set(x, t, z, SAND);
+    else set(x, t, z, hash(x, t, z, 61) < 0.5 ? GRAVEL : GRASS2);
+  }
+  /* centre circle */
+  for (let dz = -5; dz <= 5; dz++) for (let dx = -5; dx <= 5; dx++) {
+    const d = Math.hypot(dx, dz);
+    if (d >= 3.6 && d <= 4.6 && ev(cx + dx, cz + dz) < 1) { const t = surfY(cx + dx, cz + dz); set(cx + dx, t, cz + dz, SAND); }
+  }
+  /* 3 gold hoops per end: heights 9 / 12 / 9, ring r2 */
+  for (const end of [1, -1]) {
+    const hx = cx + end * (a - 3) * ca, hz = cz + end * (a - 3) * sa;
+    const mx = -sa * end, mz = ca * end;                /* across the pitch */
+    [4, 0, -4].forEach((off, k) => {
+      const px = Math.round(hx + mx * off), pz = Math.round(hz + mz * off);
+      const hgt = (off === 0 ? 12 : 9), t = surfY(px, pz);
+      for (let u = 1; u <= hgt; u++) set(px, t + u, pz, GOLD);
+      const cy = t + hgt + 2;
+      for (let s2 = 0; s2 < 14; s2++) {
+        const p2 = s2 / 14 * Math.PI * 2;
+        const rx = Math.round(px + mx * Math.cos(p2) * 2);
+        const rz = Math.round(pz + mz * Math.cos(p2) * 2);
+        const ry = Math.round(cy + Math.sin(p2) * 2);
+        set(rx, ry, rz, GOLD);
+      }
+    });
+  }
+  /* 10 stand towers in rotating house colours + bleachers */
+  const HOUSES = [RED, GREENH, BLUEH, YELL];
+  for (let k = 0; k < 10; k++) {
+    const p = k / 10 * Math.PI * 2 + 0.31;
+    const ru = Math.cos(p), rv = Math.sin(p);
+    const dirx = ca * ru - sa * rv, dirz = sa * ru + ca * rv;
+    for (let row = 0; row < 3; row++) {
+      const m = 1.22 + row * 0.16;
+      const n = 14;
+      for (let s2 = 0; s2 <= n; s2++) {
+        const t2 = p - 0.5 + s2 / n;                     /* arc around the pitch */
+        const eA = Math.cos(t2), eB = Math.sin(t2);
+        const orx = (a * m + row) * eA, orz = (b * m + row * 1.2) * eB;
+        const x = Math.round(cx + ca * orx - sa * orz), z = Math.round(cz + sa * orx + ca * orz);
+        const t = surfY(x, z);
+        set(x, t + 1 + row, z, row === 0 ? WOOD2 : WOOD);
+      }
+    }
+    /* tower at the arc centre */
+    const tx = Math.round(cx + ca * (a + 8) * ru - sa * (b + 8) * rv);
+    const tz = Math.round(cz + sa * (a + 8) * ru + ca * (b + 8) * rv);
+    const tt = surfY(tx, tz);
+    const hc = HOUSES[k % 4];
+    for (let y = 1; y <= 8; y++) fillDisk(tx, tz, tt + y, 2.1, hc);
+    for (let k2 = 0; k2 < 3; k2++) {                      /* pyramid cap */
+      const yy = tt + 9 + k2, r4 = 2.4 - k2 * 0.85;
+      fillDisk(tx, tz, yy, r4, k2 === 2 ? STONE3 : ROOF);
+    }
+    set(tx, tt + 12, tz, GOLD);
+  }
+}
+
+/* ── Hagrid's hut ── */
+function hagridHut() {
+  const x = 50, z = 190, t = surfY(x, z);
+  if (t <= LAKE_Y + 1) return;
+  for (let dz = -4; dz <= 4; dz++) for (let dx = -4; dx <= 4; dx++) {
+    const d = Math.hypot(dx, dz);
+    if (d <= 4.2) {
+      for (let y = 1; y <= 5; y++) set(x + dx, t + y, z + dz, y === 1 ? STONE2 : PALEST);
+    }
+  }
+  /* solid stepped thatch cone */
+  for (let k = 0; k < 6; k++) {
+    const r4 = 4.6 - k * 0.72;
+    if (r4 <= 0.4) break;
+    fillDisk(x, z, t + 5 + k, r4, k > 3 ? WOOD : WOOD2);
+  }
+  set(x, t + 1, z + 4, 0); set(x, t + 2, z + 4, 0);      /* door (south) */
+  set(x - 3, t + 3, z - 1, WIN); set(x + 3, t + 3, z + 2, WIN);
+  for (let k = 0; k < 4; k++) set(x - 2, t + 4 + k, z - 3, STONE2);   /* chimney */
+  /* 3×3 pumpkin patch + fence + lamp */
+  for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++)
+    set(x + 5 + dx, surfY(x + 5 + dx, z + 6 + dz) + 1, z + 6 + dz, PUMPK);
+  for (let k = 0; k < 22; k++) {
+    const p2 = k / 22 * Math.PI * 2;
+    const fx = Math.round(x + Math.cos(p2) * 8), fz = Math.round(z + Math.sin(p2) * 8);
+    const ft = surfY(fx, fz);
+    if (ft <= LAKE_Y + 1) continue;
+    set(fx, ft + 1, fz, WOOD);
+    if (k % 2 === 0) set(fx, ft + 2, fz, WOOD);
+  }
+  lampPost(x + 5, z - 5, surfY(x + 5, z - 5));
+  addLight(x, t + 7, z + 4, 0.9);
+}
+
+/* ── stone circle ── */
+function stoneCircle() {
+  const x = 30, z = 160, t = surfY(x, z);
+  for (let k = 0; k < 11; k++) {
+    const p2 = k / 11 * Math.PI * 2;
+    const sx = Math.round(x + Math.cos(p2) * 6), sz = Math.round(z + Math.sin(p2) * 6);
+    const st = surfY(sx, sz);
+    const hh = 4 + Math.floor(hash(sx, 0, sz, 141) * 3);
+    for (let y = 1; y <= hh; y++) set(sx, st + y, sz, hash(sx, y, sz, 142) < 0.3 ? STONE2 : PALEST);
+  }
+  set(x, t, z, MOSS);
+}
+
+/* ── Whomping Willow ── */
+function whompingWillow() {
+  const x = 72, z = 150, t = surfY(x, z);
+  for (let y = 1; y <= 7; y++) { fillBox(x, t + y, z, x + 1, t + y, z + 1, TRUNK); }
+  for (let bI = 0; bI < 9; bI++) {
+    const th = bI / 9 * Math.PI * 2 + hash(bI, 0, 0, 151);
+    const len = 5 + Math.floor(hash(bI, 1, 0, 151) * 3);
+    let px2 = x + 0.5, py2 = t + 7, pz2 = z + 0.5;
+    for (let k = 0; k < len; k++) {
+      px2 += Math.cos(th) * 0.8; pz2 += Math.sin(th) * 0.8;
+      py2 += (k < 2 ? 1.1 : k > 3 ? -1.2 : 0.25);
+      set(Math.round(px2), Math.round(py2), Math.round(pz2), WOOD);
+      if (hash(bI, k, 0, 151) < 0.3) set(Math.round(px2), Math.round(py2) + 1, Math.round(pz2), WOOD);
+      if (k === len - 1) {                                  /* drooping leaves */
+        for (let d2 = 0; d2 < 5; d2++) {
+          const lx = Math.round(px2) + (hash(bI, d2, 1, 151) * 3 - 1.5 | 0);
+          const lz = Math.round(pz2) + (hash(bI, d2, 2, 151) * 3 - 1.5 | 0);
+          const ly = Math.round(py2) - 1 - (hash(bI, d2, 3, 151) * 2 | 0);
+          set(lx, ly, lz, hash(bI, d2, 4, 151) < 0.5 ? LEAF : LEAF2);
+        }
+      }
+    }
+  }
+}
+
+/* ── boats on the lake ── */
+function buildBoats() {
+  const spots = [];
+  for (let row = 0; row < 2; row++) for (let i = 0; i < 4; i++) {
+    spots.push([
+      168 + i * 9 + (row ? 5 : 0) + Math.floor(rnd() * 3),
+      238 + row * 7 + Math.floor(rnd() * 3)
+    ]);
+  }
+  for (const [bx, bz] of spots) {
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -2; dx <= 2; dx++) {
+      if (Math.abs(dx) === 2 && Math.abs(dz) === 1) continue;   /* taper bow */
+      set(bx + dx, LAKE_Y - 1, bz + dz, WOOD);                 /* hull floor */
+      const rim = (Math.abs(dx) === 2 || Math.abs(dz) === 1);
+      if (rim) { set(bx + dx, LAKE_Y, bz + dz, WOOD2); set(bx + dx, LAKE_Y + 1, bz + dz, WOOD2); }
+    }
+    set(bx - 2, LAKE_Y + 2, bz, CANDLE);                       /* boat candle */
+  }
+}
+
+/* ── giant squid ── */
+function giantSquid() {
+  const cx2 = 192, cz2 = 234;
+  for (let k = 0; k < 4; k++) {
+    const th = k / 4 * Math.PI * 2 + 0.6;
+    let px2 = cx2 + Math.cos(th) * 2, pz2 = cz2 + Math.sin(th) * 2;
+    const arc = [0, 3, 6, 8, 9, 8, 7, 6, 4, 2];
+    for (let s2 = 0; s2 < arc.length; s2++) {
+      px2 += Math.cos(th) * 0.9; pz2 += Math.sin(th) * 0.9 + (s2 > 4 ? 0.4 : 0);
+      const y = LAKE_Y + arc[s2] - 1;
+      fillDisk(Math.round(px2), Math.round(pz2), y, 1.1, SQUID);
+    }
+  }
+  fillDisk(cx2, cz2, LAKE_Y, 2.2, SQUID); fillDisk(cx2, cz2, LAKE_Y + 1, 1.6, SQUID);
+}
+
+/* ── Hogwarts Express & Hogsmeade station ── */
+function hogwartsExpress() {
+  /* track bed + sleepers + rails (x-centre 236, z 60..130) */
+  for (let z = 60; z <= 130; z++) {
+    for (let x = 233; x <= 239; x++) set(x, 66, z, GRAVEL);
+    if (z % 2 === 0) for (let x = 234; x <= 238; x++) set(x, 67, z, WOOD);
+    set(235, 67, z, IRON); set(237, 67, z, IRON);
+  }
+  /* platform (east) */
+  for (let z = 62; z <= 128; z++) for (let x = 240; x <= 243; x++) {
+    set(x, 67, z, STONE3); set(x, 68, z, STONE3);
+    for (let y = 65; y <= 66; y++) set(x, y, z, y === 66 ? PATH : ROCK);
+  }
+  for (let z = 64; z <= 127; z += 9) { set(242, 69, z, IRON); set(242, 70, z, LANT); }
+  /* station house: walls + full two-step roof sitting on the walls */
+  for (let z = 74; z <= 92; z++) for (let x = 245; x <= 250; x++) {
+    const ed = x === 245 || x === 250 || z === 74 || z === 92;
+    if (ed) {
+      for (let y = 69; y <= 73; y++) set(x, y, z, y < 71 ? WOOD : WOOD2);
+      for (let y = 68; y > 60; y--) { if (get(x, y, z)) break; set(x, y, z, STONE2); }
+    }
+    const dx2 = Math.min(x - 245, 250 - x);
+    set(x, 74, z, WOOD2);                               /* eave row on wall top */
+    if (dx2 === 2) set(x, 75, z, ROOF2);                /* ridge along the house */
+  }
+  for (const zz of [76, 80, 84, 88]) { set(245, 71, zz, WIN); set(250, 71, zz, WIN); }
+  set(250, 70, 83, 0); set(250, 71, 83, 0); set(250, 72, 83, WOOD2); set(245, 69, 83, LANT);
+  /* ── the train itself ── */
+  const X0 = 233, X1 = 239;
+  /* engine boiler (front = z-) : z 112..124 */
+  for (let z = 112; z <= 124; z++) for (let x = X0 + 1; x <= X1 - 1; x++) {
+    set(x, 69, z, TRAINR);                                 /* red skirt */
+    for (let y = 70; y <= 73; y++) set(x, y, z, BLACK);
+  }
+  for (let y = 70; y <= 75; y++) set(236, y, 113, BLACK);   /* chimney */
+  set(236, 76, 113, IRON);
+  fillBox(234, 74, 115, 238, 74, 117, IRON);
+  set(236, 70, 111, LANT);                                  /* headlamp */
+  /* cab */
+  for (let z = 104; z <= 111; z++) for (let x = X0; x <= X1; x++) {
+    const ed = x === X0 || x === X1;
+    if (ed) for (let y = 69; y <= 75; y++) set(x, y, z, TRAINR);
+  }
+  fillBox(233, 76, 103, 239, 76, 112, BLACK);               /* cab roof */
+  for (const zz of [105, 107, 109]) { set(233, 71, zz, WIN); set(233, 72, zz, WIN); set(239, 71, zz, WIN); set(239, 72, zz, WIN); }
+  /* tender */
+  for (let z = 96; z <= 101; z++) for (let x = X0 + 1; x <= X1 - 1; x++) {
+    for (let y = 69; y <= 72; y++) set(x, y, z, BLACK);
+  }
+  fillBox(234, 73, 95, 238, 73, 102, TRAINR);
+  for (let x = 234; x <= 238; x++) for (let z = 95; z <= 102; z++) { set(x, 68, z, IRON); set(x, 68, z, z % 3 === 0 ? WOOD2 : IRON); }
+  /* three red carriages */
+  for (let c2 = 0; c2 < 3; c2++) {
+    const zA = 66 + c2 * 10, zB = zA + 8;
+    for (let z = zA; z <= zB; z++) for (let x = X0 + 1; x <= X1 - 1; x++) {
+      for (let y = 69; y <= 72; y++) set(x, y, z, TRAINR);
+    }
+    fillBox(233, 73, zA - 1, 239, 73, zB + 1, BLACK);
+    for (let z = zA + 1; z <= zB - 1; z += 3)
+      for (let y = 70; y <= 71; y++) { set(233, y, z, WIN); set(239, y, z, WIN); }
+    for (let x = 234; x <= 238; x++) for (let z = zA - 1; z <= zB + 1; z++) {
+      set(x, 68, z, IRON);
+      if (z % 2 === 0) set(x, 68, z, WOOD2);
+    }
+  }
+  addLight(242, 71, 84, 0.9);
+}
+
+/* ── trees ── */
+function plantPine(x, z, t) {
+  const th = 2 + Math.floor(hash(x, 0, z, 151) * 2);
+  for (let y = 1; y <= th; y++) set(x, t + y, z, TRUNK);
+  let yy = t + th + 1;
+  const rings = [3, 2, 3, 2, 1];
+  for (let rI = 0; rI < rings.length - 1; rI++) {
+    for (let k = 0; k < 2; k++) {
+      fillDisk(x, z, yy++, rings[rI] - k * 0.7 + 0.4,
+               hash(x, yy, z, 161) < 0.5 ? LEAF2 : LEAF3);
+    }
+  }
+  fillDisk(x, z, yy, 0.7, LEAF3);
+}
+
+function plantOak(x, z, t) {
+  const th = 3 + Math.floor(hash(x, 0, z, 151) * 3);
+  for (let y = 1; y <= th; y++) set(x, t + y, z, TRUNK);
+  const rx = 2.6 + hash(x, 1, z, 151) * 1.6, ry = 2.2 + hash(x, 2, z, 151), rz = 2.6 + hash(x, 3, z, 151) * 1.6;
+  const cy = t + th + ry;
+  for (let dz = -4; dz <= 4; dz++) for (let dy = -3; dy <= 3; dy++)
+    for (let dx = -4; dx <= 4; dx++) {
+      const e = (dx / rx) ** 2 + (dy / ry) ** 2 + (dz / rz) ** 2;
+      /* solid core + noisy edge shell — no interior holes */
+      if (e <= 0.72 ||
+          (e <= 1.06 && hash(x + dx, dy, z + dz, 171) < 0.78 - (e - 0.72) * 0.9))
+        set(x + dx, Math.round(cy) + dy, z + dz,
+            hash(x + dx, dy, z + dz, 172) < 0.3 ? LEAF2 : (hash(x, dy, z, 173) < 0.28 ? LEAF3 : LEAF));
+    }
+}
+
+/* ── keep-clear zones ── */
+function clearOf(x, z) {
+  const dpx = x - PX(800), dpz = z - PZ(330);              /* pitch */
+  if ((dpx / 33) ** 2 + (dpz / 22) ** 2 <= 1) return false;
+  if (Math.hypot(x - 50, z - 190) < 17) return false;      /* hut */
+  if (Math.hypot(x - 30, z - 160) < 15) return false;      /* circle */
+  if (Math.hypot(x - 72, z - 150) < 10) return false;      /* willow */
+  if (x > 222 && z > 54 && z < 136) return false;          /* station */
+  return true;
+}
+
+function forbiddenForest() {
+  const occ = new Uint8Array(W * D);   /* coarse-cell occupancy for spacing */
+  const forZone = (x, z) => (x < 100 && z < 210) || (z < 92 && x < 152) || (z > 170 && x < 128);
+  for (let n = 0; n < 9000; n++) {
+    const x = 4 + Math.floor(rnd() * (W - 10)), z = 4 + Math.floor(rnd() * (D - 10));
+    if (!clearOf(x, z)) continue;
+    const t = surfY(x, z);
+    if (t <= LAKE_Y + 1) continue;                        /* water / beach */
+    if (t >= 94) continue;                                /* castle plateau stays bare */
+    const zone = forZone(x, z);
+    let den;
+    if (zone) den = fbm(x * 0.05, z * 0.05, 3, 303) > 0.33 ? 0.9 : 0.25;
+    else den = t < GROUND2 ? 0.06 : 0.015;                /* sparse elsewhere */
+    if (rnd() > den) continue;
+    const gp = zone ? 3 : 4;                              /* occupancy spacing */
+    const oi = Math.floor(x / gp) + W * Math.floor(z / gp);
+    if (occ[oi]) continue;
+    /* avoid buildings & cliffs */
+    if (get(x, t + 2, z)) continue;
+    if (Math.abs(surfY(x + 1, z) - t) > 2 || Math.abs(surfY(x, z + 1) - t) > 2) continue;
+    if (x < 3 || z < 3 || x > W - 4 || z > D - 4) continue;
+    if (hash(x, 0, z, 181) < 0.55) plantPine(x, z, t); else plantOak(x, z, t);
+    occ[oi] = 1;
+  }
+}
+
+function cliffBushes() {
+  for (let z = 2; z < D - 2; z++) for (let x = 2; x < W - 2; x++) {
+    const t = surfY(x, z), m = get(x, t, z);
+    const rocky = (m === ROCK || m === ROCK2);
+    const grassy = (m === GRASS || m === GRASS2) && t < GROUND2 && t > BASE_Y;
+    if (!rocky && !grassy) continue;
+    if (!clearOf(x, z)) continue;                         /* pitch, hut, circle… stay bare */
+    const p2 = rocky ? 0.11 : 0.03;
+    if (hash(x, 2, z, 191) > p2) continue;
+    for (let dz = -1; dz <= 1; dz++) for (let dy = 0; dy <= 1; dy++)
+      for (let dx = -1; dx <= 1; dx++)
+        if (hash(x + dx, dy, z + dz, 192) < 0.72)
+          set(x + dx, t + 1 + dy, z + dz, hash(x, dy, z, 193) < 0.5 ? LEAF2 : (hash(x, dy, z, 194) < 0.4 ? LEAF3 : LEAF));
+  }
+}
+
+function buildGrounds() {
+  levelStationTier();
+  quidditchPitch();
+  hagridHut();
+  stoneCircle();
+  whompingWillow();
+  /* gravel paths: bridge → circle → Hagrid, gatehouse → lake */
+  pathLine(40, 175, 30, 162, GRAVEL);
+  pathLine(30, 162, 44, 186, GRAVEL);
+  pathLine(79, 131, 92, 150, GRAVEL);
+  pathLine(92, 150, 97, 168, GRAVEL);
+  forbiddenForest();
+  cliffBushes();
+  buildBoats();
+  giantSquid();
+  hogwartsExpress();
+}
+/* ════════════════════════════════════════════════════════════════════
+   06_mesher.js — voxel → triangle mesher
+   48³ chunks, face culling, voxel AO, colour grain, compact buffers.
+   Also: meshCells() for cloud/moon blobs and miniMesh() for the car.
+   ════════════════════════════════════════════════════════════════════ */
+
+const CH = 48, NXC = W / CH, NYCH = Math.ceil(H / CH), NZC = D / CH;
+
+/* face table: normal n, axes u, v with u × v = n; corners CCW from outside */
+const FACES = [
+  { n: [1, 0, 0],  u: [0, 1, 0], v: [0, 0, 1] },   /* +x */
+  { n: [-1, 0, 0], u: [0, 0, 1], v: [0, 1, 0] },   /* -x */
+  { n: [0, 1, 0],  u: [0, 0, 1], v: [1, 0, 0] },   /* +y */
+  { n: [0, -1, 0], u: [1, 0, 0], v: [0, 0, 1] },   /* -y */
+  { n: [0, 0, 1],  u: [1, 0, 0], v: [0, 1, 0] },   /* +z */
+  { n: [0, 0, -1], u: [0, 1, 0], v: [1, 0, 0] }    /* -z */
+];
+const FBASE = [[1, 0, 0], [0, 0, 0], [0, 1, 0], [0, 0, 0], [0, 0, 1], [0, 0, 0]];
+const AOF = [0.55, 0.68, 0.84, 1.0];
+const CORN = [[0, 0], [1, 0], [1, 1], [0, 1]];
+
+/* precomputed per face / corner offsets: corner position and AO samples */
+const CPOS = [], AOS = [];
+for (let f = 0; f < 6; f++) {
+  const F = FACES[f];
+  const b0 = [[1, 0, 0], [0, 0, 0], [0, 1, 0], [0, 0, 0], [0, 0, 1], [0, 0, 0]][f];
+  CPOS.push(CORN.map(([a, c]) => [
+    b0[0] + a * F.u[0] + c * F.v[0],
+    b0[1] + a * F.u[1] + c * F.v[1],
+    b0[2] + a * F.u[2] + c * F.v[2]
+  ]));
+  AOS.push(CORN.map(([a, c]) => {
+    const m1 = a ? 1 : -1, m2 = c ? 1 : -1;
+    const du = [m1 * F.u[0], m1 * F.u[1], m1 * F.u[2]];
+    const dv = [m2 * F.v[0], m2 * F.v[1], m2 * F.v[2]];
+    return [du, dv, [du[0] + dv[0], du[1] + dv[1], du[2] + dv[2]]];
+  }));
+}
+
+const MAXV = 340000;                     /* scratch vertex capacity per chunk */
+const sPos = new Int16Array(MAXV * 3);
+const sNor = new Int8Array(MAXV * 3);
+const sCol = new Uint16Array(MAXV * 3);
+const sIdx = new Uint32Array(MAXV / 4 * 6);
+let facesDropped = 0;                    /* faces skipped when a chunk overflows */
+
+const OPA = m => m !== 0 && KIND[m] < 3;              /* opaque test */
+
+/* first pass: count visible faces per material slot — needed to give each
+   slot a disjoint region of the shared scratch buffers (all four counters
+   previously started at 0 and overwrote each other's faces in mixed chunks) */
+function countChunkFaces(x0, y0, z0, yEnd, xL, zL) {
+  const cnt = [0, 0, 0, 0];
+  for (let y = y0; y < yEnd; y++)
+    for (let z = z0; z < z0 + zL; z++)
+      for (let x = x0; x < x0 + xL; x++) {
+        const m = grid[I(x, y, z)];
+        if (!m) continue;
+        const kind = KIND[m];
+        for (let f = 0; f < 6; f++) {
+          const n = FACES[f].n;
+          const nb = get(x + n[0], y + n[1], z + n[2]);
+          if (kind === 3) { if (nb !== 0 && KIND[nb] !== 4) continue; }
+          else if (kind === 4) { if (nb !== 0 && KIND[nb] !== 3) continue; }
+          else if (OPA(nb)) continue;
+          cnt[kind - 1]++;
+        }
+      }
+  return cnt;
+}
+
+/* build chunk quad soup into the scratch buffers → four slot objects */
+function meshChunk(x0, y0, z0, xL, yL, zL) {
+  const z0e = y0 + yL > H ? H : y0 + yL;
+  const cnt = countChunkFaces(x0, y0, z0, z0e, xL, zL);
+  const s0 = { v: 0, i: 0, b: 0, ib: 0, drop: 0 }, s1 = { v: 0, i: 0, b: 0, ib: 0, drop: 0 };
+  const s2 = { v: 0, i: 0, b: 0, ib: 0, drop: 0 }, s3 = { v: 0, i: 0, b: 0, ib: 0, drop: 0 };
+  const slots = [s0, s1, s2, s3];
+  let totV = 0, totI = 0;
+  for (let k = 0; k < 4; k++) {
+    slots[k].b = totV; slots[k].ib = totI;
+    totV += cnt[k] * 4; totI += cnt[k] * 6;
+  }
+  if (totV > MAXV) {                        /* whole-chunk overflow: drop all */
+    facesDropped += cnt[0] + cnt[1] + cnt[2] + cnt[3];
+    return slots;
+  }
+  for (let y = y0; y < z0e; y++)
+    for (let z = z0; z < z0 + zL; z++)
+      for (let x = x0; x < x0 + xL; x++) {
+        const m = grid[I(x, y, z)];
+        if (!m) continue;
+        const kind = KIND[m];                /* 1 solid · 2 emissive · 3 water · 4 glass */
+        let S, isOpq, isLiq, isGlass;
+        if (kind === 1) { S = s0; isOpq = true; isLiq = false; isGlass = false; }
+        else if (kind === 2) { S = s1; isOpq = true; isLiq = false; isGlass = false; }
+        else if (kind === 3) { S = s2; isOpq = false; isLiq = true; isGlass = false; }
+        else { S = s3; isOpq = false; isLiq = false; isGlass = true; }
+
+        for (let f = 0; f < 6; f++) {
+          const F = FACES[f], n = F.n;
+          const nx = x + n[0], ny = y + n[1], nz = z + n[2];
+          const nb = get(nx, ny, nz);
+          if (isOpq) { if (OPA(nb)) continue; }
+          else if (isLiq) { if (nb !== 0 && KIND[nb] !== 4) continue; }
+          else { if (nb !== 0 && KIND[nb] !== 3) continue; }
+
+          const lv = S.v;                    /* local vertex id inside the slot */
+          if (S.b + lv + 4 > MAXV) { S.drop = (S.drop || 0) + 1; continue; }
+          const g = 1 + (hash(x, y, z, 5) - 0.5) * 2 * VARY[m];
+          const cr = CCH[m * 3], cg = CCH[m * 3 + 1], cb = CCH[m * 3 + 2];
+          const cps = CPOS[f], aos = AOS[f];
+          const ao = [3, 3, 3, 3];
+          if (isOpq) {
+            for (let ci = 0; ci < 4; ci++) {
+              const [du, dv, dbc] = aos[ci];
+              const o1 = get(x + n[0] + du[0], y + n[1] + du[1], z + n[2] + du[2]);
+              const s1 = OPA(o1);
+              const o2 = get(x + n[0] + dv[0], y + n[1] + dv[1], z + n[2] + dv[2]);
+              const s2 = OPA(o2);
+              if (s1 && s2) { ao[ci] = 0; continue; }
+              const oc = get(x + n[0] + dbc[0], y + n[1] + dbc[1], z + n[2] + dbc[2]);
+              const sl = OPA(oc) ? 1 : 0;
+              ao[ci] = 3 - ((s1 ? 1 : 0) + (s2 ? 1 : 0) + sl);
+            }
+          }
+          for (let ci = 0; ci < 4; ci++) {
+            const vi = (S.b + lv + ci) * 3, cp = cps[ci];
+            sPos[vi] = x + cp[0]; sPos[vi + 1] = y + cp[1]; sPos[vi + 2] = z + cp[2];
+            sNor[vi] = n[0] * 127; sNor[vi + 1] = n[1] * 127; sNor[vi + 2] = n[2] * 127;
+            let aoV = ao ? ao[ci] : 3;
+            if (kind === 2 && aoV < 2) aoV = 2;      /* emissive glow clamp */
+            const aa = AOF[aoV] * g;
+            sCol[vi] = (cr * aa > 1 ? 1 : cr * aa) * 65535;
+            sCol[vi + 1] = (cg * aa > 1 ? 1 : cg * aa) * 65535;
+            sCol[vi + 2] = (cb * aa > 1 ? 1 : cb * aa) * 65535;
+          }
+          const bi = S.ib + S.i, flip = (ao[0] + ao[2]) < (ao[1] + ao[3]);
+          if (!flip) {
+            sIdx[bi] = lv; sIdx[bi + 1] = lv + 1; sIdx[bi + 2] = lv + 2;
+            sIdx[bi + 3] = lv; sIdx[bi + 4] = lv + 2; sIdx[bi + 5] = lv + 3;
+          } else {
+            sIdx[bi] = lv + 1; sIdx[bi + 1] = lv + 2; sIdx[bi + 2] = lv + 3;
+            sIdx[bi + 3] = lv + 1; sIdx[bi + 4] = lv + 3; sIdx[bi + 5] = lv;
+          }
+          S.v += 4; S.i += 6;
+        }
+      }
+  facesDropped += s0.drop + s1.drop + s2.drop + s3.drop;
+  return [s0, s1, s2, s3];
+}
+
+/* build chunk meshes into the scene; returns triangle count */
+async function buildChunkMeshes(scene, progress, yieldFn) {
+  let tris = 0;
+  const make = (o, matr, cast, recv) => {
+    if (o.v === 0) return;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(sPos.slice(o.b * 3, (o.b + o.v) * 3), 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(sNor.slice(o.b * 3, (o.b + o.v) * 3), 3, true));
+    geometry.setAttribute('color', new THREE.BufferAttribute(sCol.slice(o.b * 3, (o.b + o.v) * 3), 3, true));
+    geometry.setIndex(new THREE.BufferAttribute(sIdx.slice(o.ib, o.ib + o.i), 1));
+    geometry.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geometry, matr);
+    mesh.castShadow = cast; mesh.receiveShadow = recv;
+    if (matr.transparent) mesh.renderOrder = 2;
+    scene.add(mesh);
+    tris += o.i / 3;
+  };
+  for (let cy = 0; cy < NYCH; cy++)
+    for (let cx2 = 0; cx2 < NXC; cx2++)
+      for (let cz = 0; cz < NZC; cz++) {
+        const r = meshChunk(cx2 * CH, cy * CH, cz * CH, CH, Math.min(CH, H - cy * CH), CH);
+        make(r[0], MATS.solid, true, true);
+        make(r[1], MATS.emis, true, false);
+        make(r[2], MATS.water, false, false);
+        make(r[3], MATS.glass, false, true);
+        progress();
+        await yieldFn();
+      }
+  return tris;
+}
+
+/* small voxel-map mesher (clouds, moon): cells = Set("x,y,z") at `cell` size */
+function meshCells(cells, cell, color) {
+  const has = (x, y, z) => cells.has(x + ',' + y + ',' + z);
+  const pos = [], nor = [], col = [], idx = [];
+  for (const key of cells) {
+    const xyz = key.split(',').map(Number), x = xyz[0], y = xyz[1], z = xyz[2];
+    for (let f = 0; f < 6; f++) {
+      const F = FACES[f], n = F.n;
+      const FB = [[1, 0, 0], [0, 0, 0], [0, 1, 0], [0, 0, 0], [0, 0, 1], [0, 0, 0]][f];
+      if (has(x + n[0], y + n[1], z + n[2])) continue;
+      const vb = pos.length / 3;
+      for (const [a, c] of CORN) {
+        pos.push((x + FB[0] + a * F.u[0] + c * F.v[0]) * cell,
+                 (y + FB[1] + a * F.u[1] + c * F.v[1]) * cell,
+                 (z + FB[2] + a * F.u[2] + c * F.v[2]) * cell);
+        nor.push(n[0], n[1], n[2]);
+        col.push(color[0], color[1], color[2]);
+      }
+      idx.push(vb, vb + 1, vb + 2, vb, vb + 2, vb + 3);
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  geometry.setIndex(idx);
+  return geometry;
+}
+
+/* merged axis-aligned boxes for mini models: [{x,y,z,sx,sy,sz,hex,glow,lum}] */
+function miniMesh(parts) {
+  const solid = { pos: [], nor: [], col: [], idx: [] };
+  const glow = { pos: [], nor: [], col: [], idx: [] };
+  const cTmp = new THREE.Color();
+  for (const p of parts) {
+    const t = p.glow ? glow : solid;
+    cTmp.set(p.hex);
+    if (p.lum) cTmp.multiplyScalar(p.lum);
+    const x0 = p.x - p.sx / 2, y0 = p.y - p.sy / 2, z0 = p.z - p.sz / 2;
+    const x1 = p.x + p.sx / 2, y1 = p.y + p.sy / 2, z1 = p.z + p.sz / 2;
+    const PTS = [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0],
+                 [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]];
+    /* box quads as [i0,i1,i2,i3, nx,ny,nz] */
+    const QF = [[4, 5, 6, 7, 0, 0, 1], [1, 0, 3, 2, 0, 0, -1], [5, 1, 2, 6, 0, 1, 0],
+                [0, 4, 7, 3, 0, -1, 0], [3, 7, 6, 2, 1, 0, 0], [0, 1, 5, 4, -1, 0, 0]];
+    for (const q of QF) {
+      const vb = t.pos.length / 3;
+      for (let oi = 0; oi < 4; oi++) {
+        const P = PTS[q[oi]];
+        t.pos.push(P[0], P[1], P[2]);
+        t.nor.push(q[4], q[5], q[6]);
+        t.col.push(cTmp.r, cTmp.g, cTmp.b);
+      }
+      t.idx.push(vb, vb + 1, vb + 2, vb, vb + 2, vb + 3);
+    }
+  }
+  const mk = t => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(t.pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(t.nor, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(t.col, 3));
+    g.setIndex(t.idx);
+    return g;
+  };
+  return { solid: mk(solid), glow: mk(glow) };
+}
+/* ════════════════════════════════════════════════════════════════════
+   07_scene.js — renderer, sky, lights, materials, clouds, moon, car
+   ════════════════════════════════════════════════════════════════════ */
+
+let renderer, scene, camIso, camPer, composer, rPass, bloomPass;
+const MATS = {};
+let moonLight, hemiLight, ambLight;
+let moonMesh, cloudGroup, carGroup, carLight;
+let cloudUnits = [];
+let flickers = [];
+
+/* MOON_SKY: 8° above horizon, 45° left of the default view's back direction.
+   Default yaw 0.62 → camera forward f = (−sin, 0, −cos) = (−0.581,0,−0.814);
+   left = up×f = (−0.814,0,0.581); azimuth = normalize(f+left) = (−0.986,−0.165). */
+const MOON_SKY = (() => {
+  const az = [-0.9864, -0.1646];
+  const cp = Math.cos(8 * DR);
+  return new THREE.Vector3(az[0] * cp, Math.sin(8 * DR), az[1] * cp);
+})();
+
+function sceneInit() {
+  const canvas = document.createElement('canvas');
+  document.getElementById('app').appendChild(canvas);
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.32;
+
+  scene = new THREE.Scene();
+
+  /* lights */
+  hemiLight = new THREE.HemisphereLight(0x5a6cc0, 0x1a1522, 1.4);
+  ambLight  = new THREE.AmbientLight(0x202848, 0.9);
+  scene.add(hemiLight, ambLight);
+  moonLight = new THREE.DirectionalLight(0xb4c4ff, 3.5);
+  const lv = new THREE.Vector3(MOON_SKY.x * 0.6, 1, MOON_SKY.z * 0.6).normalize();
+  moonLight.position.set(CX + lv.x * 450, PLAT_Y + lv.y * 450, CZ + lv.z * 450);
+  moonLight.target.position.set(CX, PLAT_Y, CZ);
+  scene.add(moonLight, moonLight.target);
+  moonLight.castShadow = true;
+  moonLight.shadow.mapSize.set(4096, 4096);
+  const sc = moonLight.shadow.camera;
+  sc.left = -200; sc.right = 200; sc.top = 200; sc.bottom = -200;
+  sc.near = 100; sc.far = 1100;
+  moonLight.shadow.bias = -0.0004;
+  moonLight.shadow.normalBias = 0.35;
+  moonLight.shadow.radius = 3;
+
+  /* materials */
+  MATS.solid = new THREE.MeshLambertMaterial({ vertexColors: true });
+  MATS.emis  = new THREE.MeshBasicMaterial({ vertexColors: true });
+  MATS.emis.color.setRGB(1.9, 1.9, 1.9);
+  MATS.water = new THREE.MeshPhongMaterial({ vertexColors: true, transparent: true, opacity: 0.8,
+    shininess: 90, specular: 0x5c74b8, depthWrite: false });
+  MATS.glass = new THREE.MeshPhongMaterial({ vertexColors: true, transparent: true, opacity: 0.5,
+    shininess: 60, specular: 0x9fd8c8, emissive: 0x14261c });
+
+  /* gradient night dome */
+  {
+    const geo = new THREE.SphereGeometry(2600, 32, 24);
+    const pos = geo.attributes.position, col = new Float32Array(pos.count * 3);
+    const STOPS = [[0, 0x050817], [0.36, 0x0b1336], [0.62, 0x15215a], [0.82, 0x1c2a6a],
+                   [1, 0x1c2a6a]];
+    const cA = new THREE.Color(), cB = new THREE.Color(), cT = new THREE.Color();
+    for (let i = 0; i < pos.count; i++) {
+      const t = clamp((pos.getY(i) / 2600 + 1) / 2, 0, 1);
+      let s = 0;
+      while (s < STOPS.length - 2 && t > STOPS[s + 1][0]) s++;
+      const [t0, h0] = STOPS[s], [t1, h1] = STOPS[s + 1];
+      cA.setHex(h0); cB.setHex(h1);
+      cT.copy(cA).lerp(cB, clamp((t - t0) / (t1 - t0), 0, 1));
+      col[i * 3] = cT.r; col[i * 3 + 1] = cT.g; col[i * 3 + 2] = cT.b;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    const dome = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      vertexColors: true, side: THREE.BackSide, depthWrite: false, depthTest: false, fog: false }));
+    dome.renderOrder = -3; dome.frustumCulled = false;
+    scene.add(dome);
+  }
+
+  /* stars */
+  {
+    const N2 = 2200, p = new Float32Array(N2 * 3), colS = new Float32Array(N2 * 3);
+    const cT = new THREE.Color();
+    for (let i = 0; i < N2; i++) {
+      let x, y, z2;
+      do {
+        x = rnd() * 2 - 1; y = rnd() * 2 - 1; z2 = rnd() * 2 - 1;
+      } while (x * x + y * y + z2 * z2 > 1 || y < -0.06);
+      const l = 1800 / Math.hypot(x, y, z2);
+      p[i * 3] = CX + x * l; p[i * 3 + 1] = PLAT_Y + y * l; p[i * 3 + 2] = CZ + z2 * l;
+      cT.setHSL(0.58 + rnd() * 0.09, rnd() * 0.35, 0.72 + rnd() * 0.28);
+      colS[i * 3] = cT.r; colS[i * 3 + 1] = cT.g; colS[i * 3 + 2] = cT.b;
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(p, 3));
+    g.setAttribute('color', new THREE.BufferAttribute(colS, 3));
+    const pts = new THREE.Points(g, new THREE.PointsMaterial({
+      size: 1.6, sizeAttenuation: false, vertexColors: true,
+      depthWrite: false, depthTest: false, fog: false }));
+    pts.renderOrder = -2; pts.frustumCulled = false;
+    scene.add(pts);
+  }
+
+  /* cameras + composer */
+  camIso = new THREE.OrthographicCamera(-10, 10, 10, -10, 1, 8000);
+  camPer = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 1, 8000);
+  composer = new EffectComposer(renderer);
+  rPass = new RenderPass(scene, camIso);
+  bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.7, 0.35, 0.85);
+  composer.addPass(rPass);
+  composer.addPass(bloomPass);
+  composer.addPass(new OutputPass());
+
+  buildClouds();
+  buildMoon();
+  buildFlyingCar();
+}
+
+/* ── clouds ── */
+const CLOUDM = new THREE.MeshLambertMaterial({
+  color: 0x7783ab, transparent: true, opacity: 0.62, emissive: 0x10162e, depthWrite: false });
+
+function makeCloudCell() {
+  const cells = new Set();
+  const lumps = [];
+  const nE = 3 + Math.floor(rnd() * 5);
+  for (let e = 0; e < nE; e++)
+    lumps.push({
+      x: (rnd() * 2 - 1) * 12, y: (rnd() * 2 - 1) * 3, z: (rnd() * 2 - 1) * 12,
+      rx: 5 + rnd() * 8, ry: 3 + rnd() * 3.5, rz: 5 + rnd() * 8
+    });
+  let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9, zz0 = 1e9, zz1 = -1e9;
+  for (const L of lumps) {
+    x0 = Math.min(x0, L.x - L.rx); x1 = Math.max(x1, L.x + L.rx);
+    y0 = Math.min(y0, L.y - L.ry); y1 = Math.max(y1, L.y + L.ry);
+    zz0 = Math.min(zz0, L.z - L.rz); zz1 = Math.max(zz1, L.z + L.rz);
+  }
+  for (let z = Math.floor(zz0 / 2); z <= Math.ceil(zz1 / 2); z++)
+    for (let y = Math.floor(y0 / 2); y <= Math.ceil(y1 / 2); y++)
+      for (let x = Math.floor(x0 / 2); x <= Math.ceil(x1 / 2); x++) {
+        const px = x * 2, py = y * 2, pz = z * 2;
+        for (const L of lumps) {
+          const dx = (px - L.x) / L.rx, dy = (py - L.y) / L.ry, dz = (pz - L.z) / L.rz;
+          if (dx * dx + dy * dy + dz * dz <= 1) { cells.add(x + ',' + y + ',' + z); break; }
+        }
+      }
+  return cells;
+}
+
+function buildClouds() {
+  cloudGroup = new THREE.Group();
+  cloudGroup.position.set(CX, 0, CZ);                     /* pivot = island centre */
+  for (let i = 0; i < 26; i++) {
+    const ang = rnd() * Math.PI * 2, rr = (R - 12) + rnd() * 40;
+    const cx = CX + Math.cos(ang) * rr, cz = CZ + Math.sin(ang) * rr;
+    const yy = LAKE_Y - 52 + rnd() * 40;
+    const g = new THREE.Mesh(meshCells(makeCloudCell(), 2, [1, 1, 1]), CLOUDM);
+    g.position.set(cx - CX, yy, cz - CZ);
+    cloudGroup.add(g);
+    cloudUnits.push({ mesh: g, baseY: yy, ph: rnd() * 6.28, sp: 0.35 + rnd() * 0.5 });
+  }
+  for (let i = 0; i < 4; i++) {
+    const ang = rnd() * Math.PI * 2, rr = 175 + rnd() * 105;
+    const cx = CX + Math.cos(ang) * rr, cz = CZ + Math.sin(ang) * rr, yy = 130 + rnd() * 42;
+    const g = new THREE.Mesh(meshCells(makeCloudCell(), 2, [1, 1, 1]), CLOUDM);
+    g.position.set(cx - CX, yy, cz - CZ);
+    cloudGroup.add(g);
+    cloudUnits.push({ mesh: g, baseY: yy, ph: rnd() * 6.28, sp: 0.35 + rnd() * 0.5 });
+  }
+  scene.add(cloudGroup);
+}
+
+/* ── the voxel moon ── */
+function buildMoon() {
+  const cells = new Set(), R2 = 6.35 * 6.35;
+  for (let z = -7; z <= 7; z++) for (let y = -7; y <= 7; y++)
+    for (let x = -7; x <= 7; x++) {
+      const d2 = x * x + y * y + z * z;
+      if (d2 <= R2 && hash(x, y, z, 311) > 0.06) cells.add(x + ',' + y + ',' + z);
+    }
+  moonMesh = new THREE.Mesh(meshCells(cells, 3, [1.28, 1.22, 1.08]),
+    new THREE.MeshBasicMaterial({ vertexColors: true, fog: false }));
+  moonMesh.renderOrder = -1;
+  moonMesh.frustumCulled = false;
+  scene.add(moonMesh);
+}
+
+/* re-project the moon into the sky every frame */
+function updateMoon() {
+  const dx = Math.sin(view.yaw) * Math.cos(view.pitch);
+  const dy = Math.sin(view.pitch);
+  const dz = Math.cos(view.yaw) * Math.cos(view.pitch);
+  const fx = -dx, fyv = -dy, fz = -dz;                    /* camera forward   */
+  let rx = -fz, ry = 0, rz = fx;                          /* right = fwd × up */
+  const rl = Math.hypot(rx, rz) || 1; rx /= rl; rz /= rl;
+  const ux = ry * fz - rz * fyv, uy = rz * fx - rx * fz, uz2 = rx * fyv - ry * fx;
+  /* up = right × fwd */
+  const lx = MOON_SKY.x * rx + MOON_SKY.y * 0 + MOON_SKY.z * rz;
+  const ly = MOON_SKY.x * ux + MOON_SKY.y * uy + MOON_SKY.z * uz2;
+  const lz = -(MOON_SKY.x * dx + MOON_SKY.y * dy + MOON_SKY.z * dz);
+  if (lz <= 0.05) { moonMesh.visible = false; return; }
+  moonMesh.visible = true;
+  const iso = view.ortho;
+  const tanV = iso ? 1.42815 : Math.tan(22.5 * DR);
+  const aspect = innerWidth / innerHeight;
+  const halfH = view.dist * (iso ? 0.42 : tanV);
+  const ndcX = (lx / lz) / (tanV * aspect);
+  const ndcY = (ly / lz) / tanV;
+  const px = view.tx - dx * 1400 + ux * ndcY * halfH + rx * ndcX * halfH * aspect;
+  const py = view.ty - dy * 1400 + uy * ndcY * halfH + 0 * ndcX * halfH * aspect;
+  const pz = view.tz - dz * 1400 + uz2 * ndcY * halfH + rz * ndcX * halfH * aspect;
+  moonMesh.position.set(px, py, pz);
+  moonMesh.scale.setScalar(Math.max(0.35, halfH / 300));
+}
+
+/* ── the flying Ford Anglia ── */
+function buildFlyingCar() {
+  const parts = [
+    { x: 0, y: -1.7, z: 0, sx: 4, sy: 1.3, sz: 8.2, hex: '#6d9cc2' },      // chassis
+    { x: 0, y: -0.75, z: 3.0, sx: 3.7, sy: 0.7, sz: 2.6, hex: '#6d9cc2' }, // bonnet
+    { x: 0, y: -0.75, z: -2.7, sx: 3.7, sy: 0.7, sz: 3.2, hex: '#6d9cc2' },// boot
+    { x: 0, y: -2.0, z: 4.35, sx: 3.3, sy: 0.8, sz: 0.9, hex: '#b8bec6' }, // chrome F
+    { x: 0, y: -2.0, z: -4.35, sx: 3.3, sy: 0.8, sz: 0.9, hex: '#b8bec6' },// chrome R
+    { x: 0, y: 0.15, z: 0.55, sx: 3.4, sy: 1.45, sz: 4.7, hex: '#2c3a5a' },// window band
+    { x: -1.75, y: 0.15, z: 2.35, sx: 0.7, sy: 1.45, sz: 0.7, hex: '#6d9cc2' },
+    { x: 1.75,  y: 0.15, z: 2.35, sx: 0.7, sy: 1.45, sz: 0.7, hex: '#6d9cc2' },
+    { x: -1.75, y: 0.15, z: -1.35, sx: 0.7, sy: 1.45, sz: 0.7, hex: '#6d9cc2' },
+    { x: 1.75,  y: 0.15, z: -1.35, sx: 0.7, sy: 1.45, sz: 0.7, hex: '#6d9cc2' },
+    { x: 0, y: 1.05, z: 0.55, sx: 4.1, sy: 0.55, sz: 5.7, hex: '#6d9cc2' }, // blue roof
+    { x: -1.95, y: -2.55, z: 2.6, sx: 1.15, sy: 2.3, sz: 2.3, hex: '#141419' },
+    { x: 1.95,  y: -2.55, z: 2.6, sx: 1.15, sy: 2.3, sz: 2.3, hex: '#141419' },
+    { x: -1.95, y: -2.55, z: -2.6, sx: 1.15, sy: 2.3, sz: 2.3, hex: '#141419' },
+    { x: 1.95,  y: -2.55, z: -2.6, sx: 1.15, sy: 2.3, sz: 2.3, hex: '#141419' },
+    { x: -1.2, y: -1.45, z: 4.5, sx: 0.95, sy: 0.75, sz: 0.45, hex: '#fff3d8', glow: true, lum: 2.4 },
+    { x: 1.2,  y: -1.45, z: 4.5, sx: 0.95, sy: 0.75, sz: 0.45, hex: '#fff3d8', glow: true, lum: 2.2 },
+    { x: -1.35, y: -1.45, z: -4.5, sx: 0.9, sy: 0.6, sz: 0.4, hex: '#ff4038', glow: true, lum: 1.5 },
+    { x: 1.35,  y: -1.45, z: -4.5, sx: 0.9, sy: 0.6, sz: 0.4, hex: '#ff4038', glow: true, lum: 1.5 }
+  ];
+  const g = miniMesh(parts);
+  carGroup = new THREE.Group();
+  const mS = new THREE.Mesh(g.solid, MATS.solid); mS.castShadow = true;
+  const mG = new THREE.Mesh(g.glow, MATS.emis);
+  carGroup.add(mS, mG);
+  carGroup.scale.setScalar(1.3);
+  carLight = new THREE.PointLight(0xffe2b0, 45, 45, 1.6);
+  carLight.position.set(0, -0.8, 9);
+  carGroup.add(carLight);
+  scene.add(carGroup);
+}
+
+let carTheta = 0;
+function updateFlyingCar(t, dt) {
+  carTheta += 0.1 * dt;
+  const th = carTheta;
+  const px = 148 + 98 * Math.cos(th);
+  const py = PLAT_Y + 50 + 10 * Math.sin(2 * th) + 3 * Math.sin(3 * th);
+  const pz = 145 + 95 * Math.sin(th);
+  const bob = 1.2 * Math.sin(2.4 * t) + 0.3 * Math.sin(5.3 * t);
+  carGroup.position.set(px, py + bob, pz);
+  const th2 = th + 0.09;
+  carGroup.lookAt(148 + 98 * Math.cos(th2),
+                  PLAT_Y + 50 + 10 * Math.sin(2 * th2) + 3 * Math.sin(3 * th2),
+                  145 + 95 * Math.sin(th2));
+  carGroup.rotateZ(0.16 + 0.1 * Math.sin(1.7 * t));
+  carGroup.rotateX(0.07 * Math.sin(2.4 * t + 1));
+}
+
+/* lantern flicker */
+function buildPointLights() {
+  for (const p of POINTS) {
+    const L = new THREE.PointLight(0xffa24d, 38 * p.s, 44, 1.3);
+    L.position.set(p.x, p.y, p.z);
+    scene.add(L);
+    flickers.push({ L, s: p.s, ph: rnd() * 40 });
+  }
+}
+function updateLights(t) {
+  for (const f of flickers)
+    f.L.intensity = 38 * f.s * (0.84 + 0.16 * vnoise(t * 5 + f.ph, f.ph * 2, 999));
+}
+
+function updateClouds(t, dt) {
+  cloudGroup.rotation.y += dt * 0.0035;
+  for (const c of cloudUnits) {
+    c.mesh.position.y = c.baseY + Math.sin(t * c.sp + c.ph) * 1.6;
+  }
+}
+
+/* warm point-light list is built after chunk meshes */
+function addPointLights() { buildPointLights(); }
+/* ════════════════════════════════════════════════════════════════════
+   08_main.js — camera controls, build pipeline, render loop
+   ════════════════════════════════════════════════════════════════════ */
+
+const view = {
+  tx: CX + 4, ty: PLAT_Y - 4, tz: CZ + 4,
+  yaw: 0.62, pitch: 0.6155, dist: 330, distGoal: 330,
+  ortho: true
+};
+const RESET = { yaw: 0.62, pitch: 0.6155, dist: 330, distGoal: 330, tx: CX + 4, ty: PLAT_Y - 4, tz: CZ + 4 };
+let autoOrbit = false, trisTotal = 0, fps = 60;
+
+const keys = {};
+const canvasEl = () => renderer.domElement;
+
+function viewDir() {
+  const cp = Math.cos(view.pitch);
+  return [Math.sin(view.yaw) * cp, Math.sin(view.pitch), Math.cos(view.yaw) * cp];
+}
+
+function updateCamera() {
+  const [dx, dy, dz] = viewDir();
+  const aspect = innerWidth / innerHeight;
+  if (view.ortho) {
+    const halfH = view.dist * 0.42, halfW = halfH * aspect;
+    camIso.left = -halfW; camIso.right = halfW;
+    camIso.top = halfH; camIso.bottom = -halfH;
+    camIso.position.set(view.tx + dx * 1500, view.ty + dy * 1500, view.tz + dz * 1500);
+    camIso.up.set(0, 1, 0);
+    camIso.lookAt(view.tx, view.ty, view.tz);
+    camIso.updateProjectionMatrix();
+    rPass.camera = camIso;
+  } else {
+    camPer.aspect = aspect;
+    camPer.position.set(view.tx + dx * view.dist, view.ty + dy * view.dist, view.tz + dz * view.dist);
+    camPer.lookAt(view.tx, view.ty, view.tz);
+    camPer.updateProjectionMatrix();
+    rPass.camera = camPer;
+  }
+}
+
+/* ── input ── */
+function applyKeys(dt) {
+  const K = (...cs) => cs.some(c => keys[c]);
+  const shift = K('ShiftLeft', 'ShiftRight');
+  const spd = Math.max(12, view.dist * 0.75) * (shift ? 3 : 1) * dt;
+  const [dx, dy, dz] = viewDir();
+  const fwd = view.ortho ? [-Math.sin(view.yaw), 0, -Math.cos(view.yaw)] : [-dx, -dy, -dz];
+  const rx = Math.cos(view.yaw), rz = -Math.sin(view.yaw);
+  if (K('KeyW')) { view.tx += fwd[0] * spd; view.ty += fwd[1] * spd; view.tz += fwd[2] * spd; }
+  if (K('KeyS')) { view.tx -= fwd[0] * spd; view.ty -= fwd[1] * spd; view.tz -= fwd[2] * spd; }
+  if (K('KeyA')) { view.tx -= rx * spd; view.tz -= rz * spd; }
+  if (K('KeyD')) { view.tx += rx * spd; view.tz += rz * spd; }
+  if (K('KeyR', 'Space')) view.ty += spd;
+  if (K('KeyF', 'KeyC')) view.ty -= spd;
+  if (K('KeyQ')) view.yaw += 0.9 * dt;
+  if (K('KeyE')) view.yaw -= 0.9 * dt;
+  if (K('ArrowLeft')) view.yaw += 0.9 * dt;
+  if (K('ArrowRight')) view.yaw -= 0.9 * dt;
+  if (K('ArrowUp')) view.pitch = clamp(view.pitch + 0.55 * dt, 0.03, 1.5);
+  if (K('ArrowDown')) view.pitch = clamp(view.pitch - 0.55 * dt, 0.03, 1.5);
+  const zf = K('Equal', 'NumpadAdd', 'PageUp', 'KeyZ') ? 1 : 0,
+        zo = K('Minus', 'NumpadSubtract', 'PageDown', 'KeyX') ? 1 : 0;
+  if (zf) view.distGoal = clamp(view.distGoal * Math.exp(1.1 * dt), 6, 900);
+  if (zo) view.distGoal = clamp(view.distGoal / Math.exp(1.1 * dt), 6, 900);
+  view.tx = clamp(view.tx, -400, W + 400);
+  view.tz = clamp(view.tz, -400, D + 400);
+  view.ty = clamp(view.ty, -200, 700);
+}
+
+function bindInput() {
+  const el = canvasEl();
+  addEventListener('keydown', e => {
+    if (e.code === 'KeyP') { view.ortho = !view.ortho; updateStats(); }
+    else if (e.code === 'KeyT') autoOrbit = !autoOrbit;
+    else if (e.code === 'KeyH') document.getElementById('help').classList.toggle('packed');
+    else if (e.code === 'Digit0' || e.code === 'Home') { Object.assign(view, RESET); setMode(true); }
+    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown'].includes(e.code))
+      e.preventDefault();
+    keys[e.code] = true;
+  });
+  addEventListener('keyup', e => keys[e.code] = false);
+  addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+  el.addEventListener('wheel', e => {
+    e.preventDefault();
+    view.distGoal = clamp(view.distGoal * Math.pow(1.0016, e.deltaY), 6, 900);
+  }, { passive: false });
+
+  const pts = new Map();
+  let panMode = false, last = null;
+  el.addEventListener('pointerdown', e => {
+    el.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    panMode = e.button !== 0 || e.shiftKey;
+    if (pts.size === 2) panMode = true;
+    last = { x: e.clientX, y: e.clientY };
+    el.style.cursor = 'grabbing';
+  });
+  el.addEventListener('pointermove', e => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size >= 2) {                                  /* pinch zoom + pan */
+      const ids = [...pts.keys()], a = pts.get(ids[0]), b = pts.get(ids[1]);
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinchD) view.distGoal = clamp(view.distGoal * pinchD / d, 6, 900);
+      pinchD = d;
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      if (lastP) pan(mx - lastP.x, my - lastP.y);
+      lastP = { x: mx, y: my };
+      return;
+    }
+    const dx2 = e.clientX - last.x, dy2 = e.clientY - last.y;
+    last = { x: e.clientX, y: e.clientY };
+    if (panMode) pan(dx2, dy2);
+    else {
+      view.yaw -= dx2 * 0.0052;
+      view.pitch = clamp(view.pitch + dy2 * 0.0045, 0.03, 1.5);
+    }
+  });
+  let pinchD = 0, lastP = null;
+  const end = e => {
+    pts.delete(e.pointerId);
+    if (pts.size < 2) { pinchD = 0; lastP = null; }
+    if (pts.size === 0) { el.style.cursor = 'grab'; panMode = false; }
+  };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
+  el.style.cursor = 'grab';
+
+  function pan(dx2, dy2) {
+    const s = view.dist * 0.0016;
+    const [dx3, dy3, dz3] = viewDir();
+    const fx = -dx3, fyv = -dy3, fz = -dz3;
+    let rx2 = -fz, rz2 = fx; const rl = Math.hypot(rx2, rz2) || 1; rx2 /= rl; rz2 /= rl;
+    const ux2 = -rz2 * fyv, uy2 = rz2 * fx - rx2 * fz, uz2 = rx2 * fyv;
+    view.tx += (ux2 * dy2 - rx2 * dx2) * s;
+    view.ty += uy2 * dy2 * s;
+    view.tz += (uz2 * dy2 - rz2 * dx2) * s;
+  }
+}
+
+/* ── loader helpers ── */
+function setProgress(frac, msg) {
+  document.getElementById('fill').style.width = Math.round(frac * 100) + '%';
+  if (msg) document.getElementById('lstep').textContent = msg;
+}
+const tickIO = () => new Promise(r => {          /* unthrottled by background tabs */
+  const ch = new MessageChannel();
+  ch.port1.onmessage = () => { ch.port1.close(); r(); };
+  ch.port2.postMessage(0);
+});
+
+/* ── stats & debug hooks ── */
+function updateStats() {
+  document.getElementById('stats').textContent =
+    `${fps | 0} fps · ${(trisTotal / 1000 | 0)}k tris · ${view.ortho ? 'isometric' : 'perspective'}`;
+}
+
+window.__cam = o => {
+  if (o) {
+    if ('az' in o) view.yaw = +o.az;
+    if ('el' in o) view.pitch = +o.el;
+    if ('dist' in o) { view.dist = +o.dist; view.distGoal = +o.dist; }
+    if ('tx' in o) view.tx = +o.tx;
+    if ('ty' in o) view.ty = +o.ty;
+    if ('tz' in o) view.tz = +o.tz;
+    if ('ortho' in o) view.ortho = !!o.ortho;
+    updateCamera();
+  }
+  return { az: view.yaw, el: view.pitch, dist: view.dist,
+           tx: view.tx, ty: view.ty, tz: view.tz, ortho: view.ortho };
+};
+window.__stats = {};
+window.hogwarts = { get view() { return view; }, scene: () => scene, get, PAL };
+
+/* ── build pipeline ── */
+function setMode(orthoMode) { view.ortho = orthoMode; }
+
+async function main() {
+  const fail = e => {
+    console.error(e);
+    const box = document.getElementById('lerr');
+    box.style.display = 'block';
+    box.textContent = 'Error: ' + (e && (e.stack || e.message || e));
+  };
+  self.addEventListener('error', e => fail(e.error || e.message));
+  self.addEventListener('unhandledrejection', e => fail(e.reason));
+
+  try {
+    sceneInit();
+    await tickIO();
+
+    setProgress(0.05, 'raising the island…');
+    buildTerrain();
+    await tickIO();
+
+    setProgress(0.14, 'laying the castle walls…');
+    buildCastle();
+    await tickIO();
+
+    setProgress(0.3, 'growing the grounds…');
+    buildGrounds();
+    await tickIO();
+
+    setProgress(0.36, 'carving 200,000 faces…');
+    const nCh = NXC * NYCH * NZC; let done = 0;
+    trisTotal = await buildChunkMeshes(scene, () => {
+      done++;
+      setProgress(0.36 + 0.5 * done / nCh, `carving faces… ${(done / nCh * 100 | 0)}%`);
+    }, tickIO);
+    if (facesDropped) console.warn('mesh overflow: ' + facesDropped + ' faces dropped');
+
+    setProgress(0.9, 'hanging the clouds…');
+    buildPointLights();
+    await tickIO();
+
+    setProgress(1, 'waking the night…');
+    updateCamera();
+    updateMoon();
+    await tickIO();
+
+    addEventListener('resize', () => {
+      renderer.setSize(innerWidth, innerHeight);
+      composer.setSize(innerWidth, innerHeight);
+      bloomPass.setSize(innerWidth, innerHeight);
+    });
+
+    bindInput();
+    let last = performance.now(), tAcc = 0, statT = 0;
+    function loop(now) {
+      requestAnimationFrame(loop);
+      const dt = Math.min(0.05, (now - last) / 1000); last = now;
+      tAcc += dt;
+      fps = fps * 0.94 + (1 / Math.max(dt, 1e-4)) * 0.06;
+      applyKeys(dt);
+      if (autoOrbit) view.yaw += 0.22 * dt;
+      view.dist += (view.distGoal - view.dist) * Math.min(1, dt * 7);
+      updateCamera();
+      updateClouds(tAcc, dt);
+      updateFlyingCar(tAcc, dt);
+      updateMoon();
+      updateLights(tAcc);
+      composer.render();
+      statT += dt;
+      if (statT > 0.5) {
+        statT = 0;
+        updateStats();
+        Object.assign(window.__stats, { fps, tris: trisTotal, mode: view.ortho ? 'iso' : 'persp',
+                                        dist: view.dist, dropped: facesDropped,
+                                        drawn: renderer.info.render.triangles,
+                                        calls: renderer.info.render.calls });
+      }
+    }
+    requestAnimationFrame(loop);
+
+    const ld = document.getElementById('loader');
+    ld.style.opacity = '0';
+    setTimeout(() => ld.style.display = 'none', 900);
+    setTimeout(() => { document.getElementById('hint').style.opacity = '0'; }, 7000);
+  } catch (e) { fail(e); }
+}
+
+main();
+</script>
+</body>
+</html>

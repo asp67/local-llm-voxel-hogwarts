@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voxel Hogwarts — Floating Diorama</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: linear-gradient(180deg, #060b18 0%, #0c1830 55%, #142749 100%);
+  }
+  canvas { display: block; }
+  #hud {
+    position: fixed; left: 14px; top: 14px; z-index: 10;
+    font-family: "Segoe UI", system-ui, sans-serif; font-size: 13px; line-height: 1.55;
+    color: #2b3a4a; background: rgba(255, 255, 255, 0.78);
+    border: 1px solid rgba(43, 58, 74, 0.15); border-radius: 10px;
+    padding: 10px 14px; max-width: 300px; user-select: none;
+    box-shadow: 0 2px 10px rgba(40, 60, 80, 0.12);
+  }
+  #hud h1 { font-size: 15px; margin: 0 0 6px; color: #1e2c3a; letter-spacing: 0.4px; }
+  #hud b { color: #1e2c3a; font-weight: 600; }
+  #hud .dim { opacity: 0.68; }
+  #stats { margin-top: 6px; opacity: 0.55; font-size: 11px; }
+  #toggle {
+    position: fixed; right: 14px; top: 14px; z-index: 10; cursor: pointer;
+    font-family: "Segoe UI", sans-serif; font-size: 12px; color: #2b3a4a;
+    background: rgba(255,255,255,0.78); border: 1px solid rgba(43,58,74,0.15);
+    border-radius: 8px; padding: 6px 10px; user-select: none;
+  }
+</style>
+</head>
+<body>
+<div id="hud">
+  <h1>⚡ Voxel Hogwarts</h1>
+  <div><b>W A S D</b> — fly through the scene</div>
+  <div><b>Space / Shift</b> — rise &amp; descend</div>
+  <div><b>Drag</b> — look around &nbsp;·&nbsp; <b>Right-drag</b> — pan</div>
+  <div><b>Wheel / ↑ ↓ / + −</b> — zoom</div>
+  <div class="dim">Built from <span id="voxcount">…</span> voxel blocks · <span id="lightcount">…</span> lights</div>
+</div>
+<div id="toggle">hide UI</div>
+<script src="vendor/three.min.js"></script>
+<script src="src/scene.js"></script>
+<script>
+  document.getElementById('toggle').addEventListener('click', function () {
+    const hud = document.getElementById('hud');
+    const hidden = hud.style.display === 'none';
+    hud.style.display = hidden ? '' : 'none';
+    this.textContent = hidden ? 'hide UI' : 'show UI';
+  });
+  window.addEventListener('load', function () {
+    if (window.__voxelStats) {
+      document.getElementById('voxcount').textContent =
+        window.__voxelStats.drawn.toLocaleString('en-US');
+      document.getElementById('lightcount').textContent =
+        window.__voxelStats.lights.toLocaleString('en-US');
+    }
+  });
+</script>
+</body>
+</html>

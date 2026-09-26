@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voxel Hogwarts — Floating Diorama (V2)</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: linear-gradient(180deg, #050817 0%, #0b1336 38%, #15215a 72%, #1c2a6a 100%);
+  }
+  canvas { display: block; image-rendering: pixelated; image-rendering: crisp-edges; }
+  /* ---- loader ---- */
+  #loader {
+    position: fixed; inset: 0; z-index: 40; display: flex;
+    align-items: center; justify-content: center;
+    background: linear-gradient(180deg, #050817 0%, #0b1336 38%, #15215a 72%, #1c2a6a 100%);
+    transition: opacity .6s ease; font-family: "Segoe UI", system-ui, sans-serif;
+  }
+  #loader.done { opacity: 0; pointer-events: none; }
+  .lbox { width: 340px; text-align: center; color: #8fa6d8; }
+  .ltitle { font-size: 17px; letter-spacing: 3px; color: #cfd9f5; margin-bottom: 14px; text-shadow: 0 0 12px rgba(120,150,255,.35); }
+  .lbar { height: 6px; background: rgba(255,255,255,.10); border-radius: 3px; overflow: hidden; }
+  #lfill { height: 100%; width: 0%; background: linear-gradient(90deg, #ffa845, #ffcf78); transition: width .18s ease; }
+  #lstatus { margin-top: 10px; font-size: 12px; opacity: .75; min-height: 16px; }
+  /* ---- help HUD ---- */
+  #hud {
+    position: fixed; left: 14px; top: 14px; z-index: 10;
+    font-family: "Segoe UI", system-ui, sans-serif; font-size: 13px; line-height: 1.55;
+    color: #b9c6e6; background: rgba(10, 16, 38, 0.72);
+    border: 1px solid rgba(140, 160, 220, 0.22); border-radius: 10px;
+    padding: 10px 14px; max-width: 300px; user-select: none; backdrop-filter: blur(4px);
+  }
+  #hud h1 { font-size: 15px; margin: 0 0 6px; color: #e6ecff; letter-spacing: 0.6px; font-weight: 600; }
+  #hud b { color: #ffd9a0; font-weight: 600; }
+  #hud .dim { opacity: 0.6; font-size: 12px; }
+  #hud.collapsed .body { display: none; }
+  #stats {
+    position: fixed; left: 14px; bottom: 12px; z-index: 10;
+    font-family: "Consolas", "Courier New", monospace; font-size: 11px;
+    color: rgba(180, 197, 235, 0.55); user-select: none; white-space: pre;
+  }
+  #toggle {
+    position: fixed; right: 14px; top: 14px; z-index: 10; cursor: pointer;
+    font-family: "Segoe UI", sans-serif; font-size: 12px; color: #b9c6e6;
+    background: rgba(10, 16, 38, 0.72); border: 1px solid rgba(140, 160, 220, 0.22);
+    border-radius: 8px; padding: 6px 10px; user-select: none;
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="loader">
+  <div class="lbox">
+    <div class="ltitle">HOGWARTS &middot; VOXEL DIORAMA</div>
+    <div class="lbar"><div id="lfill"></div></div>
+    <div id="lstatus">waking the castle&hellip;</div>
+  </div>
+</div>
+<div id="hud">
+  <h1>&#9889; Voxel Hogwarts <span class="dim">v2</span></h1>
+  <div class="body">
+    <div><b>W A S D</b> — move &nbsp;·&nbsp; <b>R / F</b> — rise &amp; descend</div>
+    <div><b>Q / E</b> or <b>&larr; &rarr;</b> — rotate &nbsp;·&nbsp; <b>&uarr; &darr;</b> — tilt</div>
+    <div><b>Drag</b> — orbit &nbsp;·&nbsp; <b>Right-drag</b> — pan &nbsp;·&nbsp; <b>Wheel</b> — zoom</div>
+    <div><b>P</b> — isometric / perspective &nbsp;·&nbsp; <b>T</b> — auto-orbit</div>
+    <div><b>0</b> — reset view &nbsp;·&nbsp; <b>H</b> — hide this panel</div>
+    <div class="dim">Shift held = 3&times; speed · everything is procedural voxels</div>
+  </div>
+</div>
+<div id="stats"></div>
+<div id="toggle">hide UI</div>
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';

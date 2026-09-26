@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Voxel Hogwarts — Night Diorama (V2)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#050817;overflow:hidden;
+    font:12px/1.5 "Segoe UI",system-ui,-apple-system,sans-serif;color:#c9d1ee;
+    -webkit-user-select:none;user-select:none}
+  #app{position:fixed;inset:0}
+  #app canvas{display:block;width:100%;height:100%;image-rendering:pixelated;image-rendering:crisp-edges}
+
+  /* ── loader ── */
+  #loader{position:fixed;inset:0;z-index:40;display:flex;flex-direction:column;gap:14px;
+    align-items:center;justify-content:center;text-align:center;
+    background:radial-gradient(ellipse at 50% 38%,#101a3d 0%,#050817 68%);
+    transition:opacity .7s ease .15s}
+  #loader h1{margin:0;font-size:30px;letter-spacing:.42em;color:#d9b96a;font-weight:600;text-indent:.42em}
+  #loader p{margin:0;color:#8b96c4;letter-spacing:.22em;font-size:11px;text-indent:.22em}
+  #bar{width:300px;height:7px;border-radius:4px;background:#131c40;border:1px solid #232f60;overflow:hidden}
+  #fill{height:100%;width:0%;border-radius:4px;background:linear-gradient(90deg,#5b74c0,#ffa845);transition:width .25s}
+  #lstep{color:#7281b5;font-size:11px;letter-spacing:.14em;min-height:15px}
+  #lerr{color:#ff8a7a;font-size:11px;max-width:520px;white-space:pre-wrap;display:none}
+
+  /* ── HUD ── */
+  #hud{position:fixed;left:10px;top:8px;z-index:10;font:11px/1.4 Consolas,monospace;color:#aeb9e2;
+    text-shadow:0 1px 3px rgba(0,0,0,.9);pointer-events:none}
+  #hud b{color:#ffd08a;font-weight:600;letter-spacing:.3em}
+  #stats{color:#7f8cc0}
+
+  #help{position:fixed;right:10px;bottom:10px;z-index:10;max-width:270px;padding:10px 12px;
+    background:rgba(9,13,32,.72);border:1px solid #26305e;border-radius:8px;backdrop-filter:blur(3px);
+    font-size:11px;line-height:1.55;color:#93a0cf}
+  #help b{color:#ffd08a;letter-spacing:.16em}
+  #help .k{color:#e8ecff;background:#1d274f;border:1px solid #31406f;border-radius:3px;
+    padding:0 4px;margin-right:3px;font:10px Consolas,monospace}
+  #help.packed{display:none}
+  #hint{position:fixed;left:50%;bottom:12px;transform:translateX(-50%);z-index:9;
+    color:#66719e;font-size:11px;letter-spacing:.12em;text-shadow:0 1px 3px #000;transition:opacity 1s}
+</style>
+<script>
+window.addEventListener('error', e => {
+  const el = document.getElementById('lerr');
+  if (!el) return;
+  el.style.display = 'block';
+  el.textContent = (el.textContent ? el.textContent + '\n' : '') +
+    'Error: ' + (e.message || e.error || e) +
+    (e.filename ? '\n  at ' + e.filename + ':' + e.lineno : '');
+});
+</script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
+</script>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="loader">
+  <h1>HOGWARTS</h1>
+  <p>VOXEL&nbsp;NIGHT&nbsp;DIORAMA</p>
+  <div id="bar"><div id="fill"></div></div>
+  <div id="lstep">raising the stones…</div>
+  <div id="lerr"></div>
+</div>
+
+<div id="hud"><b>VOXEL HOGWARTS</b><div id="stats">…</div></div>
+
+<div id="help">
+  <b>CONTROLS</b><br>
+  <span class="k">W A S D</span> move &nbsp;<span class="k">R F</span> / <span class="k">Q E</span> rise·turn<br>
+  <span class="k">drag</span> orbit &nbsp;<span class="k">right-drag</span> pan &nbsp;<span class="k">wheel</span> zoom<br>
+  <span class="k">P</span> isometric ⇄ perspective &nbsp;<span class="k">T</span> auto-orbit<br>
+  <span class="k">0</span> reset view &nbsp;<span class="k">H</span> panel &nbsp;<span class="k">Shift</span> 3× speed
+</div>
+<div id="hint">drag to orbit · wheel to zoom · P for perspective</div>
+
+<script type="module">
