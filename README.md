@@ -57,6 +57,5 @@ Then open for example `http://localhost:8731/GLM%20Voxel%20Hogwarts/V2/index.htm
 ## Notes
 
 - **Reference images are not included.** The prompt and the plan refer to images in a `Vorlage/` folder (mood renders, a plan view and elevations of the castle). They are left out on purpose because some of them are copyrighted. The prompt and the plan are included unchanged.
-- The prompt files differ slightly: the MiMo folder's `prompt.txt` is a variant that asks for a pastel sky-blue midday scene instead of a night scene.
 - Files like `_repair_helpers.py`, `_tune7.py` or `.zcodeignore` are leftovers from the models' working sessions and are kept as they were produced.
 - This is an unofficial fan-made technical test. Harry Potter and Hogwarts are trademarks of Warner Bros. Entertainment Inc.; this project is not affiliated with or endorsed by them. The bundled `three.min.js` files are three.js (MIT License).
